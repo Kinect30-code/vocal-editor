@@ -524,18 +524,22 @@ function whipAnchor(trackId) {
 function drawBindings() {
   const svg = $('whipSvg');
   svg.innerHTML = '';
+  const ex = whipEdgeX();     // 左侧面板右边缘: 两端都锚在这里, 线只在画布里鼓出去
+  let wk = 0;
   for (const w of S.project.whips) {
-    const a = whipAnchor(w.midiTrackId);
-    const dstRow = document.querySelector('.trk[data-trackid="' + w.targetTrackId + '"]');
-    if (!a || !dstRow) continue;
-    const mainRect = $('main').getBoundingClientRect();
-    const r = dstRow.getBoundingClientRect();
-    const b = { x: r.left - mainRect.left + 10, y: r.top - mainRect.top + r.height / 2 };
-    const my = (a.y + b.y) / 2;
+    const ys = whipRowY(w.midiTrackId), yd = whipRowY(w.targetTrackId);
+    if (ys === null || yd === null) continue;
+    const bulge = 44 + (wk++) * 16;      // 同一行出发的多条线扇开, 不重叠
+    const my = (ys + yd) / 2;
+    const a = { x: ex, y: ys }, b = { x: ex, y: yd };
     const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    p.setAttribute('d', `M ${a.x} ${a.y} C ${a.x} ${my}, ${b.x} ${my}, ${b.x} ${b.y}`);
+    p.setAttribute('d', `M ${a.x} ${a.y} C ${a.x + bulge} ${my}, ${b.x + bulge} ${my}, ${b.x} ${b.y}`);
     p.setAttribute('stroke-width', '2.5');
     svg.appendChild(p);
+    const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    ring.setAttribute('cx', a.x); ring.setAttribute('cy', a.y); ring.setAttribute('r', 4);
+    ring.setAttribute('fill', 'none'); ring.setAttribute('stroke-width', '2');
+    svg.appendChild(ring);
     const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
     dot.setAttribute('cx', b.x); dot.setAttribute('cy', b.y); dot.setAttribute('r', 5);
     dot.setAttribute('fill', '#2dd4bf');
@@ -545,10 +549,6 @@ function drawBindings() {
     stub.setAttribute('x2', b.x + 20); stub.setAttribute('y2', b.y);
     stub.setAttribute('stroke-width', '2.5');
     svg.appendChild(stub);
-    const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    ring.setAttribute('cx', a.x); ring.setAttribute('cy', a.y); ring.setAttribute('r', 4);
-    ring.setAttribute('fill', 'none'); ring.setAttribute('stroke-width', '2');
-    svg.appendChild(ring);
   }
   if (S.whip) {
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
@@ -640,6 +640,21 @@ function autoXfade(c) {
 function clipFades(c) {
   const xf = autoXfade(c);
   return { in: Math.max(c.fadeIn || 0, xf.in), out: Math.max(c.fadeOut || 0, xf.out) };
+}
+
+// whip 连线锚点: 都贴在【左侧面板区域的右边缘】(= 时间线画布左边界)。
+// 以前锚在面板内部 / 目标行左内侧 +10px, 线会横穿左侧面板, 压住音量/声像滑块。
+function whipEdgeX() {
+  const mainRect = $('main').getBoundingClientRect();
+  const tlRect = $('tl').getBoundingClientRect();
+  return tlRect.left - mainRect.left + 2;
+}
+function whipRowY(trackId) {
+  const row = document.querySelector('.trk[data-trackid="' + trackId + '"]');
+  if (!row) return null;
+  const mainRect = $('main').getBoundingClientRect();
+  const r = row.getBoundingClientRect();
+  return r.top - mainRect.top + r.height / 2;
 }
 
 // ================= 导出 / 工程 =================
@@ -1676,6 +1691,65 @@ function setFollowBpm(t, on) {
     : '关 — 绝对时间 (BGM 用)'));
 }
 
+// ---------- 轨道行上下拖拽换序 ----------
+// 拖行内空白/编号即可换序 (输入框、滑块、按钮、🌀 不抢); 换序后必须重画 whip 连线 ——
+// 连线是按轨道行位置算的, 重排后不重画就还挂在旧位置上。
+function trackRowCenterY(trackId) {
+  const row = document.querySelector('.trk[data-trackid="' + trackId + '"]');
+  if (!row) return null;
+  const pr = $('panel').getBoundingClientRect(), r = row.getBoundingClientRect();
+  return r.top - pr.top + r.height / 2;
+}
+function trackInsertIndex(clientY) {
+  const pr = $('panel').getBoundingClientRect();
+  let k = 0;
+  for (const t of S.project.tracks) {
+    const y = trackRowCenterY(t.id);
+    if (y !== null && clientY > pr.top + y) k++;
+  }
+  return k;
+}
+function trackDragStart(e, t) {
+  e.preventDefault();
+  const panel = $('panel');
+  const ins = document.createElement('div');
+  ins.id = 'insLine';
+  panel.appendChild(ins);
+  const dragRow = document.querySelector('.trk[data-trackid="' + t.id + '"]');
+  if (dragRow) dragRow.classList.add('dragging');
+  const move = ev2 => {
+    const k = trackInsertIndex(ev2.clientY);
+    const pr = panel.getBoundingClientRect();
+    const rows = S.project.tracks
+      .map(x => document.querySelector('.trk[data-trackid="' + x.id + '"]')).filter(Boolean);
+    let y = 0;
+    if (k < rows.length) y = rows[k].getBoundingClientRect().top - pr.top;
+    else if (rows.length) y = rows[rows.length - 1].getBoundingClientRect().bottom - pr.top;
+    ins.style.top = Math.round(y) + 'px';
+    ins.dataset.k = k;
+  };
+  move(e);
+  const up = () => {
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+    const k = parseInt(ins.dataset.k || '0', 10);
+    ins.remove();
+    if (dragRow) dragRow.classList.remove('dragging');
+    const from = S.project.tracks.indexOf(t);
+    const to = clamp(k > from ? k - 1 : k, 0, S.project.tracks.length - 1);
+    if (to === from) return;
+    pushUndo();
+    S.project.tracks.splice(from, 1);
+    S.project.tracks.splice(to, 0, t);
+    status('轨道 "' + t.name + '" → 第 ' + (to + 1) + ' 行 (whip 连线已重画)');
+    rebuildPanel();       // 行序号/位置
+    drawBindings();       // ← 关键: 连线按新位置重画
+    draw(); invalidate();
+  };
+  document.addEventListener('pointermove', move);
+  document.addEventListener('pointerup', up);
+}
+
 function rebuildPanel() {
   const panel = $('panel');
   panel.innerHTML = '';
@@ -1720,6 +1794,11 @@ function rebuildPanel() {
     if (tmb) tmb.addEventListener('click', () => setFollowBpm(t, !t.followBpm));
     const ntb = div.querySelector('.nt');
     if (ntb) ntb.addEventListener('click', () => setTrackFreeTune(t, !t.noTune));
+    div.addEventListener('pointerdown', e => {   // 拖行内空白/编号 = 上下换序 (滑块/按钮/输入框不抢)
+      if (e.button !== 0) return;
+      if (e.target.closest('input,button,.whip,.name')) return;
+      trackDragStart(e, t);
+    });
     div.addEventListener('contextmenu', e => {   // 轨道行右键 = 轨道菜单 (含自由变调轨开关)
       e.preventDefault(); e.stopPropagation();
       showTrackMenu(e.clientX, e.clientY, t);

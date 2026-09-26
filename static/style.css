@@ -137,6 +137,14 @@ input[type=checkbox]:checked::after{content:'';position:absolute;left:3px;top:0p
 #whipSvg path{fill:none;stroke:var(--whip);stroke-width:2;opacity:.95}
 #whipSvg line.draft{stroke:var(--accent);stroke-dasharray:5,4}
 
+/* 轨道行拖拽换序 */
+#panel{position:relative}
+#insLine{position:absolute;left:0;right:0;height:2px;margin-top:-1px;background:#2dd4bf;
+  box-shadow:0 0 8px #2dd4bf;pointer-events:none;z-index:40}
+.trk.dragging{opacity:.5}
+.trk .tidx{cursor:grab}
+.trk .tidx:active{cursor:grabbing}
+
 /* ============================ 轨道行 (88px) ============================ */
 .trk{height:var(--h-row);border-bottom:1px solid var(--border);border-left:4px solid var(--tag,var(--border));
   background:var(--surface-1);padding:5px 8px;display:flex;flex-direction:column;gap:4px}

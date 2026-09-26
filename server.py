@@ -263,9 +263,12 @@ def _warm_pool():
             os.unlink(f.name + ".r.wav")
 
 
+PORT = int(os.environ.get("VE_PORT", "8765"))
+
+
 def _open_browser():
     time.sleep(0.9)
-    url = "http://127.0.0.1:8765/"
+    url = "http://127.0.0.1:%d/" % PORT
     for cmd in (["xdg-open", url], ["gio", "open", url], ["open", url]):
         try:
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -278,10 +281,20 @@ def _open_browser():
 def main():
     if "--check" in sys.argv:
         raise SystemExit(0 if ve_env.check(strict=True) else 2)
-    ve_env.check()          # 启动先体检: 缺 ffmpeg/引擎 时给明确提示, 不静默半残
+    if os.environ.get("VE_QUIET") != "1":      # 启动器已经体检过了 → 不重复刷表
+        ve_env.check()
     _warm_pool()
-    srv = ThreadingHTTPServer(("127.0.0.1", 8765), H)
-    print("vocal-editor v2: http://127.0.0.1:8765  (engine=%s)" % dsp.ENGINE, flush=True)
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
+    except OSError as e:
+        if getattr(e, "errno", None) == 98:    # EADDRINUSE: 给能照做的提示, 不是丢一堆 traceback
+            print("端口 %d 已被占用 —— 多半是上一次没退干净的 vocal-editor。" % PORT, flush=True)
+            print("  谁占着:  ss -ltnp | grep %d" % PORT, flush=True)
+            print("  结束它:  pkill -f 'vocal-editor|server.py'", flush=True)
+            print("  换端口:  启动时带上 VE_PORT=8766", flush=True)
+            raise SystemExit(2)
+        raise
+    print("vocal-editor v2: http://127.0.0.1:%d  (engine=%s)" % (PORT, dsp.ENGINE), flush=True)
     print("数据目录: %s" % DATA, flush=True)
     if os.environ.get("VE_OPEN"):
         threading.Thread(target=_open_browser, daemon=True).start()

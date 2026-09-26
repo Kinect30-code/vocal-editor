@@ -55,10 +55,33 @@ def main():
     view.set_zoom_level(float(os.environ.get("VE_ZOOM", "1")))
     win.add(view)
 
+    # WebAudio / 媒体设置 —— 不设这些的话 WebKit 默认会要求"用户手势"才让出声, 表现就是"窗口里没声音"
+    st = view.get_settings()
+    for k, v in (("enable-webaudio", True), ("enable-media", True), ("enable-mediasource", True),
+                 ("enable-media-capabilities", True), ("media-playback-requires-user-gesture", False),
+                 ("enable-encrypted-media", False),
+                 ("enable-write-console-messages-to-stdout", True)):   # 页面 console.log → 终端, 排查用
+        try:
+            st.set_property(k, v)
+        except Exception:
+            pass
+
+    # 音频自检: 结果用 console.log 打出来 (页面 console 已转发到终端), 比 JS 回调可靠
+    PROBE_JS = (
+        "(function(){try{"
+        "var C=window.AudioContext||window.webkitAudioContext;var c=new C();"
+        "var o={before:c.state,sr:c.sampleRate};"
+        "var fin=function(tag){try{o.after=c.state;o.app=(typeof window.__audbg==='function')?window.__audbg():null;}catch(e){o.appErr=''+e;}"
+        "console.log('[audio-probe '+tag+'] '+JSON.stringify(o));};"
+        "if(c.resume&&c.state!=='running'){c.resume().then(function(){fin('resumed')},function(e){o.resumeErr=''+e;console.log('[audio-probe fail] '+JSON.stringify(o));});}"
+        "else fin('sync');"
+        "}catch(e){console.log('[audio-probe ERR] '+e.message)}})()")
+
     def on_load(_v, ev):
         if ev == WebKit2.LoadEvent.FINISHED:
             sys.stdout.write("窗口已加载: %s\n" % URL)
             sys.stdout.flush()
+            GLib.timeout_add(700, lambda: (view.run_javascript(PROBE_JS, None, None, None), False)[1])
             if SELFTEST:
                 # 自测: 走应用导出用的同一条路 (Blob + <a download>) → 验证下载落盘
                 view.run_javascript(
@@ -66,7 +89,7 @@ def main():
                     "var a=document.createElement('a');a.href=URL.createObjectURL(b);"
                     "a.download='ve-download-test.wav';document.body.appendChild(a);a.click();})()",
                     None, None, None)
-                GLib.timeout_add(2500, Gtk.main_quit)
+                GLib.timeout_add(3500, Gtk.main_quit)
 
     def on_download(_ctx, dl):
         def decide(d, suggested):

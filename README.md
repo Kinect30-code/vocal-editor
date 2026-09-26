@@ -44,6 +44,16 @@ uv pip install --python .venv/bin/python pyinstaller imageio-ffmpeg   # 打包�
 ./VocalEditor-x86_64.AppImage --check                                  # 目标机先自检, 缺什么直接列出来
 ```
 
+启动方式（`launch.sh` 同一套，源码运行 `./run.sh` 也一样）：
+
+```bash
+./VocalEditor-x86_64.AppImage              # 原生窗口 (GTK+WebKit2) → 退回 chromium --app= → 退回浏览器
+./VocalEditor-x86_64.AppImage --chromium   # 强制用 Chromium 应用窗口 (声音最稳)
+./VocalEditor-x86_64.AppImage --browser    # 用默认浏览器
+./VocalEditor-x86_64.AppImage --no-window  # 只起服务 (放服务器/远程访问)
+./VocalEditor-x86_64.AppImage --probe      # 看 8765 上是自己实例 / 别的程序 / 空闲
+```
+
 - 打进包里的：Python 3.12 + numpy/soundfile/pyworld/parselmouth + **静态 ffmpeg**（系统 ffmpeg 链了上百个 .so，换机器必挂）+ rubberband 及其依赖库 + 界面/示例工程。
 - 数据目录：打包运行时可写数据自动放到 `~/.local/share/vocal-editor/{work,projects}`（AppImage 是只读挂载）；可用 `VE_DATA_DIR` 覆盖。源码运行位置不变（还是仓库里的 `work/`、`projects/`）。
 - **glibc 是打包机上的版本**（不打 glibc）：在很新的发行版上打包，老发行版可能打不开 —— 要兼容老系统就在老的系统/容器里打包。打不开时先跑 `--check`。
@@ -87,6 +97,10 @@ uv pip install --python .venv/bin/python pyinstaller imageio-ffmpeg   # 打包�
   > 附带说明：whip 是**轨道级**路由（REAPER send 语义），该 MIDI 轨上**所有**块都按时间轴绝对时刻参与，但**每个块只在自己那块区间内接管**（出块交还原音高）。所以同一条 MIDI 轨上留着的旧测试块，只要与某音频块在时间上重叠，仍会一起参与 —— 用不到的建议删掉
 - **防误选文本（Web 端 canvas 通病）**：整页默认可选中（实测 1176 字符）→ `Ctrl+A` 一按选中整页、双击选中词、画布拖动划过文字也产生选区，接着一拖就**变成"拖文本"把拖块顶掉**。现在：全局 `user-select:none`（只给输入控件与状态栏/工程名保留可选中）、掐掉页面内原生 `dragstart`（输入框内保留）、非输入焦点时屏蔽 `Ctrl+A`；拖文件导入的高亮提示也只在真的拖文件时出现。实测 `Ctrl+A`/双击后选中字符数 = 0，拖块正常，输入框内选择与空格输入不受影响
 
+- **轨道上下换序 + whip 连线锚点 + 桌面窗口声音**
+  - **轨道行上下拖拽换序**：拖行内空白或左侧编号（`01`/`02`…）即可；滑块/按钮/名称输入框/🌀 不抢（拖那些位置还是它们自己的操作）。拖动时显示青色插入指示线。换序后**必须重画 whip 连线**——连线是按轨道行位置算的，不重画会挂在旧位置；接管语义按 **轨道 id** 走，不受顺序影响（实测：`[t1,t2,t3]` 把 t3 拖到顶 → `[t3,t1,t2]`，连线同步变成 `M 242 78 → 242 166`）。
+  - **whip 连线两端锚在「左侧面板区域的右边缘」**，曲线只往时间线画布里鼓出去 —— 以前源点锚在面板内的 🌀 按钮、终点锚在目标行左侧内 10px，整条线横穿面板，会压住音量/声道滑块。
+  - **桌面窗口（GTK + WebKit2）听不到声音**：WebKit 默认要求"用户手势"才允许出声（`media-playback-requires-user-gesture`），表现就是窗口里点了播放也没声。已在 `window.py` 里设为 false 并显式打开 WebAudio / MediaSource / 媒体能力。若某些机器上仍不稳，用 `./VocalEditor-x86_64.AppImage --chromium`（无地址栏的 Chromium 应用窗口，音频链路最稳）。
 - **同轨自动交叉淡化（Vegas / REAPER 的 auto-crossfade）**
   - 规则：**同一轨道同一时刻只有一路声音**。同轨两个片段重叠时，重叠区里前块线性淡出、后块线性淡入（线性 = 相加恒为 1：同一素材叠着放不会鼓包），**播放与导出用同一条曲线**（导出直接把这两个淡变量交给后端同一条线性斜坡）。
   - 实测（同一段人声前后叠 0.767s）：旧行为重叠区 **2.00x（+6dB，两遍叠着一起放）** → 现在 **1.00x** 全程只有一路；再用反相素材验斜坡：u=0/0.25/0.5/0.75 → 0.99/0.50/0.03/0.43（理论 1/0.5/0/0.5）→ 两条斜坡严格互补。

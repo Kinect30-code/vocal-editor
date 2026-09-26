@@ -130,7 +130,9 @@ if [ ! -x "$TOOL" ]; then
 fi
 mkdir -p "$OUT"
 if [ -x "$TOOL" ]; then
-  ARCH=x86_64 "$TOOL" --appimage-extract-and-run --no-appstream "$AD" "$OUT/$NAME-x86_64.AppImage" \
+  RT=build/runtime-x86_64
+  [ -s "$RT" ] || { echo "  下载 AppImage runtime…"; curl -fsSL -o "$RT" https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64 || true; chmod +x "$RT" 2>/dev/null; }
+  ARCH=x86_64 "$TOOL" --appimage-extract-and-run --no-appstream ${RT:+"--runtime-file" "$RT"} "$AD" "$OUT/$NAME-x86_64.AppImage" \
     || { echo "  appimagetool 失败: AppDir 已就绪, 手动执行 ARCH=x86_64 $TOOL $AD $OUT/$NAME-x86_64.AppImage"; }
 else
   echo "  没有 appimagetool: AppDir 已就绪 ($AD), 可自己再打"
