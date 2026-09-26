@@ -271,7 +271,9 @@ class H(BaseHTTPRequestHandler):
     def _dispatch(self, route, req):
         if route == "/api/analyze":          # 音乐结构分析 (确定性信号分析; 按音频内容 hash 缓存)
             p = self._audio(req.get("path", ""))
-            res, cached = analysis.analyze_cached(p, ANALYSIS)
+            os.makedirs(ANALYSIS, exist_ok=True)
+            # 放进程池: 分析是 CPU 密集型 (FFT+DP), 在主进程跑会占着 GIL 拖慢其它接口 (会拖慢播放起播) ✗
+            res, cached = POOL.submit(analysis.analyze_cached, p, ANALYSIS).result()
             res["fromCache"] = cached
             return res
         if route == "/api/pick-file":        # 桌面端: 后端弹系统文件对话框, 返回选中的路径

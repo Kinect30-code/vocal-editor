@@ -243,32 +243,31 @@ function pitchSelection(d) {
   const items = selectionItems();
   if (!items.length) return status('先选中素材块 (点击选中, Ctrl+点击 / 右键 / 框选多选)', true);
   pushUndo();
-  let na = 0, degraded = 0; const midiTracks = new Set();
+  let na = 0, tooLong = 0, tookOver = 0; const midiTracks = new Set();
   for (const it of items) {
     if (it.kind === 'audio') {
       const c = it.obj, tr = trackById(c.trackId), free = !!(tr && tr.noTune);
       const win = c.length / c.stretch;
-      // 自由变调轨 = 普通升降调: 只改音高、保时长、不变速; 浏览器内即时算, 不进渲染队列
-      if (free && Math.abs(c.stretch - 1) < 1e-4) {
-        c.pitch = clamp((c.pitch || 0) + d, -24, 24);
+      const tn = whipNotesFor(c);
+      // 变调 = 绝对只改音高, 保时长、不变速。**任何情况下都不许碰 c.stretch / c.length**。
+      // (踩过的坑, 用户反馈过多次: 老实现里 bypassWhip 或 窗口>240s 的块会走 varispeed ——
+      //  c.stretch = c.stretch/2^(d/12) 且 c.length = win*stretch, 于是"一按 = 曲子就被拉长/压短";
+      //  更坏的是 stretch 一旦被改, 自由变调轨那句 Math.abs(stretch-1)<1e-4 就永久不成立,
+      //  该块永远停在错误速度上, 之后再怎么按都"还是变速"。变速只允许来自 Alt+拖动。)
+      c.pitch = clamp((c.pitch || 0) + d, -24, 24);
+      psDrop(c);                                  // 即时变调缓存失效
+      if (free && Math.abs(c.stretch - 1) < 1e-4 && !tn && c.length <= PS_INLINE_MAX) {
+        // 自由变调轨 + 纯变调 + 窗口不大 → 浏览器内相位声码器即时算, 不进渲染队列
         if (c.render) { c.render = null; c.renderKey = null; }
         c._pend = false; c._tk = false;
-        psDrop(c); psWarm(c);
-        na++;
-        continue;
+        psWarm(c);
+      } else {
+        // 其它情况一律走后端同算法渲染 (保时长): 自由变调轨长素材 / 已有拉伸的块 / 接管块
+        ensureRender(c);
+        if (win > WIN_LIMIT_PITCH) tooLong++;
+        else if (tn) tookOver++;
       }
-      // varispeed (REAPER rate change: 音高与时长一起变) 只用于两种情况:
-      //   ① 块级"瞬时自由变调" (右键块 → 不接管 MIDI pitch) 且不在自由变调轨上
-      //   ② 窗口长到算法渲染也做不了时的兜底 (自由变调轨除外 —— 该轨禁止变速)
-      if (!free && (c.bypassWhip || win > WIN_LIMIT_PITCH)) {
-        c.stretch = clamp(c.stretch / Math.pow(2, d / 12), 0.1, 16);
-        c.length = win * c.stretch;
-        if (win > WIN_LIMIT_PITCH) degraded++;
-        ensureRender(c); na++;
-        continue;
-      }
-      c.pitch = clamp((c.pitch || 0) + d, -24, 24);   // 普通升降调: 保时长、不变速 (走算法渲染)
-      ensureRender(c); na++;
+      na++;
     } else {
       it.obj.trans = (it.obj.trans || 0) + d;    // MIDI 块转调
       midiTracks.add(it.obj.trackId); na++;
@@ -276,9 +275,10 @@ function pitchSelection(d) {
   }
   for (const tid of midiTracks) refreshTargetsOf(tid);   // 转调 → whip 目标轨自动重渲染
   invalidate();
-  status('变调 ' + (d > 0 ? '+' : '') + d + ' 半音 × ' + na + ' 块'
+  status('变调 ' + (d > 0 ? '+' : '') + d + ' 半音 × ' + na + ' 块 (保时长·不变速)'
     + (midiTracks.size ? ' (MIDI 转调, whip 已同步)' : '')
-    + (degraded ? ' · ' + degraded + ' 块窗口超过 ' + WIN_LIMIT_PITCH + 's, 只能降级为变速变调' : ''));
+    + (tookOver ? ' · ' + tookOver + ' 块正被 MIDI 接管, 音高听的是音符' : '')
+    + (tooLong ? ' · ' + tooLong + ' 块窗口超过 ' + WIN_LIMIT_PITCH + 's 渲染上限: 已跳过变调 (请先切片), 不会偷偷变速' : ''));
 }
 
 function resetSel(field) {
@@ -421,7 +421,7 @@ function addClipFromImport(j, dispName) {
   // 歌曲级素材: 后台自动做音乐结构分析 (不阻塞 UI); 短素材没必要
   if (autoAnalyzeOn() && j.duration > 25) analyzeClip(c);
 }
-function autoAnalyzeOn() { return localStorage.getItem('ve.autoAna') !== '0'; }
+function autoAnalyzeOn() { return localStorage.getItem('ve.autoAna') === '1'; }   // 默认关: 右键按需分析
 
 async function importMediaPath(p) {
   try {
@@ -756,7 +756,7 @@ async function openProject(p) {
   try {
     const j = fixProject(await post('/api/open-project', { path: p }));
     pushUndo();
-    S.project = j; S.lastProj = p;
+    S.project = j; S.lastProj = p; restoreAnalysis(S.project);
     $('projname').textContent = baseName(p);
     afterProjectSwap('工程已打开');
   } catch (e) { status(e.message, true); }
@@ -2079,6 +2079,11 @@ async function analyzeClip(c, loud) {
   try {
     const a = await post('/api/analyze', { path: c.src });
     ANA.set(c.src, a);
+    const P = S.project;
+    if (P) {   // 记住"用户点过分析"的素材 → 刷新后静默用缓存恢复 (立即落盘, 不等 800ms 合并写)
+      P.analyzed = P.analyzed || [];
+      if (!P.analyzed.includes(c.src)) { P.analyzed.push(c.src); persistSession(); }
+    }
     if (a.warning) status('结构分析: ' + a.warning, true);
     else status('结构分析完成: BPM ' + (+a.bpm).toFixed(1) + ' · ' + a.bars.length + ' 小节 · ' +
                 a.phrases.length + ' 乐句 · ' + a.transitionPoints.length + ' 个结构标记' +
@@ -2125,6 +2130,19 @@ function splitClipAtMarker(c, m) {
   invalidate();
   if (S.playing) scheduleAll();
   status('已在结构标记处切开 (Bar ' + m.bar + ' · 置信度 ' + Math.round(m.conf * 100) + '% · ' + m.type + ')');
+}
+
+// 结构分析结果缓存在 work/analysis/ (key=音频内容hash); 这里只恢复"用户自己点过分析"的素材。
+// 反复调用无副作用: ANA 已有就跳过 (撤销/重做走 fixProject 时也不会重复请求)。
+function restoreAnalysis(p) {
+  for (const src of ((p && p.analyzed) || [])) {
+    if (!src || ANA.has(src) || ANA_PEND.has(src)) continue;
+    ANA_PEND.add(src);
+    post('/api/analyze', { path: src })
+      .then(a => { ANA.set(src, a); invalidate(); })
+      .catch(() => {})
+      .finally(() => ANA_PEND.delete(src));
+  }
 }
 
 async function peaksFor(path) {
@@ -2616,7 +2634,7 @@ $('fileProj').addEventListener('change', e => {
   if (!f) return;
   f.text().then(txt => {
     pushUndo();
-    S.project = fixProject(JSON.parse(txt));
+    S.project = fixProject(JSON.parse(txt)); restoreAnalysis(S.project);
     S.lastProj = f.name; $('projname').textContent = f.name;
     afterProjectSwap('工程已打开: ' + f.name);
   }).catch(err => status('打开失败: ' + err.message, true));
@@ -2627,6 +2645,7 @@ window.addEventListener('resize', () => { invalidate(); drawBindings(); if (PR.o
 const sess = loadSession();
 if (sess) {   // 恢复上次会话 (刷新/重开浏览器不丢工程, 含 MIDI 块与音符)
   S.project = fixProject(sess.project);
+  restoreAnalysis(S.project);
   S.lastProj = sess.lastProj || null;
   if (S.lastProj) $('projname').textContent = baseName(S.lastProj);
 }
