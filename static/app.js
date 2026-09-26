@@ -1104,8 +1104,11 @@ cv.addEventListener('pointermove', e => {
     '<div class="mt-row">Bar ' + (m.bar || '?') + (ph ? ' · ' + ph.bars + '-bar phrase' : '') +
       (sec ? ' · ' + sec.cluster : '') + ' · ' + m.tl.toFixed(2) + 's</div>' +
     '<div class="mt-row">置信度 <b>' + Math.round(m.conf * 100) + '%</b> (相对本曲最强边界)</div>' +
+    '<div class="mt-row">重拍判定 ' + (a ? (+(a.downbeatStrength || 0)).toFixed(2) + '倍' + (+(a.downbeatStrength || 0) < 1.6 ? ' <b>(不确定)</b>' : '') : '—') + '</div>' +
     '<div class="mt-row">能量变化 ' + num([m.why.energy], 0, 2) + ' · 节奏变化 ' + num([m.why.rhythm], 0, 2) + '</div>' +
     '<div class="mt-row">音色变化 ' + num([m.why.timbre], 0, 2) + ' · 重音变化 ' + num([m.why.accent], 0, 2) + '</div>' +
+    '<div class="mt-row">起音强度 ' + num([m.why.onset], 0, 2) +
+      (m.why.onset != null && m.why.onset < 0.05 ? ' <b>(弱: 不在重音上, 接不齐)</b>' : '') + '</div>' +
     '<div class="mt-row">本小节 onset 密度 ' + num(F.onsetDensityNorm, bi, 2) +
       ' · 能量 ' + num(F.energy, bi, 1) + 'dB</div>' +
     (acc ? '<div class="mt-row">重音模式 ' + acc.map(v => (+v).toFixed(2)).join(' / ') + '</div>' : '') +
