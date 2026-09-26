@@ -94,7 +94,7 @@ Name=Vocal Editor
 Comment=人力VOCAL 编辑器 (MIDI 接管音高 + MIDI 离散块 + 普通变调)
 Exec=vocal-editor
 Icon=vocal-editor
-Categories=AudioVideo;Audio;Editor;
+Categories=AudioVideo;Audio;AudioVideoEditing;
 Terminal=false
 EOF
 cp "$AD/vocal-editor.desktop" "$AD/usr/share/applications/vocal-editor.desktop"
@@ -106,17 +106,17 @@ exec "$HERE/lib/vocal-editor/vocal-editor" "$@"
 EOF
 chmod +x "$AD/usr/bin/vocal-editor"
 
+# 启动器 + 原生窗口程序 (window.py 用【系统的】python3-gi 跑, 见文件头说明)
+cp launch.sh "$AD/usr/bin/launch.sh"; chmod +x "$AD/usr/bin/launch.sh"
+mkdir -p "$AD/usr/share/vocal-editor"; cp window.py "$AD/usr/share/vocal-editor/window.py"
+
 cat > "$AD/AppRun" <<'EOF'
 #!/bin/sh
 HERE="$(dirname "$(readlink -f "$0")")"
 export PATH="$HERE/usr/bin:$PATH"
 export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH:-}"
-export VE_OPEN=1
-case "$1" in
-  --check|--help) exec "$HERE/usr/bin/vocal-editor" "$@" ;;
-esac
-echo "Vocal Editor: 浏览器会自动打开 http://127.0.0.1:8765/   (这个窗口留着, Ctrl+C 退出)"
-exec "$HERE/usr/bin/vocal-editor" "$@"
+# launch.sh: 起后端 → 开原生窗口 (GTK+WebKit2, 退回 chromium --app=, 再退回浏览器) → 关窗即退出
+exec "$HERE/usr/bin/launch.sh" "$@"
 EOF
 chmod +x "$AD/AppRun"
 

@@ -56,7 +56,6 @@ MODS = [
     ("pyworld", "WORLD 引擎 (推荐: 变调/接管音质最好)", False),
     ("parselmouth", "Praat PSOLA 兜底引擎", False),
     ("mido", "导入 .mid", False),
-    ("scipy", "重采样 (可选)", False),
 ]
 BINS = [
     ("ffmpeg", "导入 mp3/mp4 等压缩音频 (必需)", True),
