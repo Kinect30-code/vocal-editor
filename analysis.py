@@ -119,6 +119,7 @@ def _envelopes(x, sr):
         "flux": flux_frame.astype(np.float32),
         "kick": kick,
         "mid": midb,
+        "perc": _perc_envelope({"fps": fps}, S, freqs),
         "chroma": chroma.astype(np.float32),
     }
 
@@ -137,6 +138,95 @@ def _tempo_period(oenv, fps):
     bpm = 60.0 * fps / lags
     prior = np.exp(-0.5 * ((np.log2(bpm / 120.0)) / 0.9) ** 2)
     return float(lags[int(np.argmax(ac[lag_lo:lag_hi + 1] * prior))])
+
+
+def _perc_envelope(env, S, freqs):
+    """打击乐权重包络: 底鼓带 + 军鼓带 + 镲带的流量之和。
+    节拍网格要靠**打击乐**对齐, 不能用人声/旋律的 onset (那些不在拍上)。"""
+    def fl(mask):
+        b = S[:, mask].sum(axis=1)
+        d = np.maximum(0.0, np.diff(np.log1p(1000.0 * b), prepend=np.log1p(1000.0 * b[:1])))
+        d = np.maximum(0.0, d - _smooth(d, int(round(env["fps"]))))
+        return d / (d.max() + 1e-9)
+    p = (1.0 * fl((freqs >= 40) & (freqs < 150)) +
+         0.8 * fl((freqs >= 150) & (freqs < 400)) +
+         0.4 * fl(freqs >= 6000))
+    return (p / (p.max() + 1e-9)).astype(np.float32)
+
+
+def _phase_metrics(peak_t, bpm):
+    """强打击乐峰的"拍内相位"直方图 → (峰均值比, 最优相位偏移)。
+
+    **峰均值比** 是判"这个 BPM/相位对不对"的硬指标, 实测能一刀切开真假:
+      真歌: 姑娘(128BPM)=3.93, imp_5f8b=4.60, 6b0c(160BPM)=4.70 ✓
+      纯人声 哈基米=1.28 ✗, 渲染片段 73da879f=1.37 ✗ → <2.0 直接拒答
+    必须用**全部峰**算 (踩过的坑: 先按拟合度筛峰再算, 任何网格都会"看起来对齐" ✗)。
+    它同时天然排除半速: 半速时峰会裂成 0/0.5 两簇 → 最强格下降 → 比值掉下来 ✓
+    """
+    per = 60.0 / bpm
+    ph = (peak_t / per) % 1.0
+    h, _ = np.histogram(ph, bins=10, range=(0.0, 1.0))
+    if h.sum() < 12:
+        return 0.0, 0.0
+    ptm = float(h.max()) / (float(h.mean()) + 1e-9)
+    k = int(np.argmax(h))
+    lo, hi = k / 10.0, (k + 1) / 10.0
+    sel = (ph >= lo) & (ph < hi)
+    if sel.sum() >= 4:
+        c = float(np.angle(np.exp(1j * (ph[sel] * 2 * np.pi)).mean())) / (2 * np.pi)
+        if c < 0:
+            c += 1.0
+        fine = c if lo <= c < hi else lo + 0.05
+    else:
+        fine = lo + 0.05
+    return ptm, float((fine % 1.0) * per)
+
+
+def _fit_grid(perc, fps, dur, lo_bpm=60.0, hi_bpm=200.0, tol_sec=0.07):
+    """**全局节拍网格拟合** → (bpm, 相位, 质量, F值, 是否可信)。
+
+    为什么必须这么做(踩坑留档): 老实现"自相关定周期 + 先验" → 报 129.199 而真值约 128.0, 差 1%,
+    260 秒漂 5 拍, 拍内相位直方图完全均匀(等于随机) ✗ → 小节/乐句/标记全错 → 用户体感"接不上"。
+    现在: 在 BPM/相位上做粗到细搜索, 目标 = 相位直方图峰均值比 × 轻度先验(压 70 以下的半速陷阱)。
+    质量 < 2.0 = 检测不到稳定节拍(纯人声/自由速度/渲染片段) → 上层直接拒答, 不再硬给标记 ✓
+    """
+    peak_t = _pick_peaks(perc, fps, min_gap=0.06, thr=0.12) / fps
+    if len(peak_t) < 20:
+        return 0.0, 0.0, 0.0, 0.0, False
+
+    def prior(b):
+        return float(np.exp(-0.5 * ((np.log2(b / 124.0)) / 0.55) ** 2)) * (1.0 if b >= 70.0 else 0.30)
+
+    def score(b):
+        ptm, ph = _phase_metrics(peak_t, b)
+        return ptm * prior(b), ptm, ph
+
+    best = None
+    for b in np.arange(lo_bpm, hi_bpm, 0.25):
+        sc, ptm, ph = score(b)
+        if best is None or sc > best[0]:
+            best = (sc, b, ptm, ph)
+    for span, step in ((0.6, 0.02), (0.05, 0.002)):      # 两轮精修
+        b0 = best[1]
+        for b in np.arange(max(lo_bpm, b0 - span), min(hi_bpm, b0 + span) + 1e-9, step):
+            sc, ptm, ph = score(b)
+            if sc > best[0]:
+                best = (sc, b, ptm, ph)
+    _, bpm, ptm, ph = best
+
+    def nearest(a, b):
+        j = np.searchsorted(b, a)
+        i0 = np.clip(j - 1, 0, len(b) - 1)
+        i1 = np.clip(j, 0, len(b) - 1)
+        return np.minimum(np.abs(b[i0] - a), np.abs(b[i1] - a))
+
+    grid = np.arange(ph, dur, 60.0 / bpm)
+    f = 0.0
+    if len(grid) >= 8:
+        prec = float((nearest(grid, peak_t) <= tol_sec).mean())
+        rec = float((nearest(peak_t, grid) <= tol_sec).mean())
+        f = 0.0 if prec + rec <= 0 else 2 * prec * rec / (prec + rec)
+    return float(bpm), float(ph), float(ptm), float(f), bool(ptm >= 2.0)
 
 
 def _dp_beats(oenv, fps, period, tightness=100.0):
@@ -412,25 +502,45 @@ def _analyze(path, progress=None):
     fps = env["fps"]
 
     if progress:
-        progress("节拍跟踪…")
-    # 自相关只给出一个候选周期; 常见"八度错误"(半速/倍速)用 onset 互解释度 (F1) 来定夺
-    period0 = _tempo_period(env["onset"], fps)
-    best = None
-    for mul in (0.5, 1.0, 2.0):
-        p = period0 * mul
-        bpm_c = 60.0 * fps / p
-        if not (50.0 <= bpm_c <= 220.0):
-            continue
-        bi = _dp_beats(env["onset"], fps, p)
-        f = _beat_f(env["onset"], bi, fps)
-        s = f + 0.03 * float(np.exp(-0.5 * ((np.log2(bpm_c / 120.0)) / 0.9) ** 2))
-        if best is None or s > best[0]:
-            best = (s, p, bi, f)
-    if best is None:
-        best = (0.0, period0, _dp_beats(env["onset"], fps, period0), 0.0)
-    _, period, bidx, beat_f1 = best
-    beats = bidx / fps
-    bpm = 60.0 * fps / period
+        progress("节拍网格拟合…")
+    # 全局拟合 BPM+相位 (老实现: 自相关+先验, 实测偏 1% → 全曲漂 5 拍, 网格与音乐脱钩 ✗)
+    bpm_f, phase_f, fit_ptm, fit_f, fit_ok = _fit_grid(env["perc"], fps, dur)
+    if not fit_ok:
+        # 检测不到稳定节拍(纯人声/自由速度/无鼓/渲染片段) → 明确拒答。
+        # 硬给一堆"结构标记"只会误导 (实测纯人声素材会算出 1.85 质量的伪节拍) ✗
+        why = ("打击乐峰太少 (%d 个)" % len(_pick_peaks(env["perc"], fps, 0.06, 0.12))) if bpm_f <= 0 else \
+              ("节拍质量 %.2f < 2.0" % fit_ptm)
+        return {"ver": ANALYSIS_VER, "sr": sr, "duration": dur, "bpm": float(bpm_f), "ppb": PPB,
+                "beatTimes": [], "downbeats": [], "bars": [], "phrases": [], "sections": [],
+                "features": {"onsetDensity": [], "energy": [], "spectralFlux": [],
+                             "accentPattern": [], "vocalProxy": [], "lowBand": [], "barTimes": []},
+                "transitionPoints": [], "gridQuality": round(float(fit_ptm), 3),
+                "warning": "检测不到稳定节拍 (" + why + ") — 可能是纯人声/自由速度/无鼓素材。不做结构分析。"}
+    if fit_ok:
+        bpm = bpm_f
+        period = 60.0 / bpm
+        beats = np.arange(phase_f, dur, period)
+        bidx = np.clip((beats * fps).astype(np.int64), 0, len(env["onset"]) - 1)
+        beat_f1 = fit_f
+    else:
+        # 兜底(自由速度/无鼓): 退回 DP 节拍跟踪
+        period0 = _tempo_period(env["onset"], fps)
+        best = None
+        for mul in (0.5, 1.0, 2.0):
+            p_ = period0 * mul
+            bpm_c = 60.0 * fps / p_
+            if not (50.0 <= bpm_c <= 220.0):
+                continue
+            bi = _dp_beats(env["onset"], fps, p_)
+            ff = _beat_f(env["onset"], bi, fps)
+            sc = ff + 0.03 * float(np.exp(-0.5 * ((np.log2(bpm_c / 120.0)) / 0.9) ** 2))
+            if best is None or sc > best[0]:
+                best = (sc, p_, bi, ff)
+        if best is None:
+            best = (0.0, period0, _dp_beats(env["onset"], fps, period0), 0.0)
+        _, period, bidx, beat_f1 = best
+        beats = bidx / fps
+        bpm = 60.0 * fps / period
 
     ph, ph_score, ph_strength = _downbeat_phase(env, bidx)
     down_idx = bidx[ph::PPB]
@@ -477,6 +587,7 @@ def _analyze(path, progress=None):
         "ver": ANALYSIS_VER,
         "sr": sr, "duration": dur, "bpm": float(bpm), "ppb": PPB,
         "beatsPerBar": PPB, "beatF1": round(float(beat_f1), 3),
+        "gridF": round(float(fit_f), 3), "gridQuality": round(float(fit_ptm), 3),
         "beatTimes": [round(float(t), 4) for t in beats],
         "downbeats": [round(float(t), 4) for t in down],
         "barPhase": int(ph), "downbeatStrength": round(float(ph_strength), 3),
