@@ -418,7 +418,10 @@ function addClipFromImport(j, dispName) {
   ensureRender(c);                                   // whip 路由自动接管新素材
   select({ kind: 'audio', id: c.id });
   status('已导入 "' + c.name + '" → ' + tr.name + ' @ ' + c.start.toFixed(2) + 's (' + j.duration.toFixed(2) + 's)');
+  // 歌曲级素材: 后台自动做音乐结构分析 (不阻塞 UI); 短素材没必要
+  if (autoAnalyzeOn() && j.duration > 25) analyzeClip(c);
 }
+function autoAnalyzeOn() { return localStorage.getItem('ve.autoAna') !== '0'; }
 
 async function importMediaPath(p) {
   try {
@@ -810,6 +813,10 @@ function hitTest(x, y) {
     if (x >= x0 - 1 && x <= x1 + 1) {
       const yTop = RULER_H + ti * ROW_H - S.scrollY + 4;
       const relY = y - yTop;
+      if (relY > (ROW_H - 8) - 12 && x1 - x0 > 8) {      // 块底部 12px = 结构标记带
+        const mk = markerAt(c, x);
+        if (mk) return { kind: 'clip', clip: c, zone: 'marker', marker: mk };
+      }
       if (x1 - x0 > 40 && relY >= 0 && relY < 10) {
         if (x - x0 < 14) return { kind: 'clip', clip: c, zone: 'fadein' };
         if (x1 - x < 14) return { kind: 'clip', clip: c, zone: 'fadeout' };
@@ -846,6 +853,10 @@ cv.addEventListener('pointerdown', e => {
   // 右键拖拽框选 (任意非标尺位置起始; 无拖动=右键菜单)
   if (e.button === 2 && h.kind !== 'ruler') {
     S.drag = { mode: 'marquee', x0: x, y0: y, x1: x, y1: y, moved: false };
+    return;
+  }
+  if (h.kind === 'clip' && h.zone === 'marker' && h.marker) {   // 点结构标记 = 在这里切开
+    splitClipAtMarker(h.clip, h.marker);
     return;
   }
   if (y > cv.clientHeight - 12 && x2t(x) < totalLen()) {
@@ -1071,6 +1082,38 @@ cv.addEventListener('pointerup', e => {
   invalidate();
 });
 
+// 结构标记悬停提示 (不参与拖拽; 只在标记带上弹)
+cv.addEventListener('pointermove', e => {
+  const tip = $('markTip');
+  if (!tip) return;
+  if (S.drag) { tip.style.display = 'none'; return; }
+  const r = cv.getBoundingClientRect();
+  const h = hitTest(e.clientX - r.left, e.clientY - r.top);
+  if (h.kind !== 'clip' || h.zone !== 'marker' || !h.marker) { tip.style.display = 'none'; return; }
+  const m = h.marker, a = analysisOf(h.clip);
+  const bi = Math.max(0, (m.bar || 1) - 1);
+  const F = (a && a.features) || {};
+  const ph = ((a && a.phrases) || []).find(p => m.src >= p.start - 1e-6 && m.src < p.end + 1e-6);
+  const sec = ((a && a.sections) || []).find(s => m.src >= s.start - 1e-6 && m.src < s.end + 1e-6);
+  const num = (arr, i, dig) => (arr && arr[i] != null ? (+arr[i]).toFixed(dig) : '—');
+  const acc = (F.accentPattern && F.accentPattern[bi]) ? F.accentPattern[bi] : null;
+  const typeName = { phrase: 'Phrase Boundary', section: 'Section Boundary', energy: 'Energy Change',
+                     rhythm: 'Rhythm Change', bar: 'Bar Boundary' }[m.type] || m.type;
+  tip.innerHTML =
+    '<b>' + typeName + '</b>' +
+    '<div class="mt-row">Bar ' + (m.bar || '?') + (ph ? ' · ' + ph.bars + '-bar phrase' : '') +
+      (sec ? ' · ' + sec.cluster : '') + ' · ' + m.tl.toFixed(2) + 's</div>' +
+    '<div class="mt-row">置信度 <b>' + Math.round(m.conf * 100) + '%</b> (相对本曲最强边界)</div>' +
+    '<div class="mt-row">能量变化 ' + num([m.why.energy], 0, 2) + ' · 节奏变化 ' + num([m.why.rhythm], 0, 2) + '</div>' +
+    '<div class="mt-row">音色变化 ' + num([m.why.timbre], 0, 2) + ' · 重音变化 ' + num([m.why.accent], 0, 2) + '</div>' +
+    '<div class="mt-row">本小节 onset 密度 ' + num(F.onsetDensityNorm, bi, 2) +
+      ' · 能量 ' + num(F.energy, bi, 1) + 'dB</div>' +
+    (acc ? '<div class="mt-row">重音模式 ' + acc.map(v => (+v).toFixed(2)).join(' / ') + '</div>' : '') +
+    '<div class="mt-hint">点一下 = 在这里切开</div>';
+  tip.style.display = 'block';
+  tip.style.left = Math.min(window.innerWidth - 252, e.clientX + 14) + 'px';
+  tip.style.top = Math.min(window.innerHeight - 176, e.clientY + 16) + 'px';
+});
 cv.addEventListener('dblclick', e => {
   const r2 = cv.getBoundingClientRect();
   const h = hitTest(e.clientX - r2.left, e.clientY - r2.top);
@@ -1121,6 +1164,37 @@ function showMenu(x, y, kind) {
     items.push(['重置变调', () => resetSel('pitch')]);
     items.push(['重置拉伸', () => resetSel('stretch')]);
     items.push(['在播放头切开 (S)', () => splitSel()]);
+    items.push(['分析音乐结构 (后台)', () => {
+      const list = selectionItems().filter(it2 => it2.kind === 'audio');
+      if (!list.length) return status('先选中音频块', true);
+      for (const it2 of list) { ANA.delete(it2.obj.src); analyzeClip(it2.obj, true); }
+    }]);
+    const mkList = selectionItems().filter(it2 => it2.kind === 'audio')
+      .reduce((n, it2) => n + markersOf(it2.obj).filter(m => m.conf >= 0.5).length, 0);
+    if (mkList) {
+      items.push(['在最近的标记处切开 (M)', () => {
+        const b = markerAtPlayhead();
+        if (!b) return status('选中的块里, 播放头附近(8s内)没有结构标记', true);
+        splitClipAtMarker(b.c, b.m);
+      }]);
+      items.push(['按标记全部切开 (' + mkList + ' 处, 置信度≥黄)', () => {
+        const list = selectionItems().filter(it2 => it2.kind === 'audio').map(it2 => it2.obj);
+        pushUndo();
+        let n = 0;
+        for (const c2 of list) {
+          // 从后往前切: 块内时间基准不变 (只改 c2.length), 但倒序更稳
+          const ms = markersOf(c2).filter(m => m.conf >= 0.5).sort((a2, b2) => b2.tl - a2.tl);
+          for (const m of ms) {
+            if (!canSplitAt(c2, m.tl)) continue;
+            splitClipRaw(c2, m.tl);
+            n++;
+          }
+        }
+        invalidate();
+        if (S.playing) scheduleAll();
+        status('已按结构标记切开 ' + n + ' 处');
+      }]);
+    }
   } else {
     items.push(['应用 whip (重跑对齐)', () => {
       const m = midiById(S.sel.id);
@@ -1212,6 +1286,11 @@ document.addEventListener('keydown', e => {
     deleteSel();
   }
   else if (e.key === 's' || e.key === 'S') splitSel();
+  else if (e.key === 'm' || e.key === 'M') {      // 在最近的音乐结构标记处切开
+    const b = markerAtPlayhead();
+    if (b) splitClipAtMarker(b.c, b.m);
+    else status('播放头附近没有结构标记 — 右键块 → "分析音乐结构"', true);
+  }
   else if (e.key === 'b' || e.key === 'B') { S.loop.a = S.playhead; syncLoop(); }
   else if (e.key === 'n' || e.key === 'N') { S.loop.b = S.playhead; syncLoop(); }
   else if (e.key === 'Escape') { if (PR.open) { prClose(); return; } select(null); invalidate(); }
@@ -1615,6 +1694,11 @@ function toggleSettings(force) {
 $('btnSettings').addEventListener('click', e => { e.stopPropagation(); toggleSettings(); });
 $('setClose').addEventListener('click', () => toggleSettings(false));
 $('setSink').addEventListener('change', e => applySink(e.target.value));
+const _aa = $('setAutoAna');
+if (_aa) { _aa.checked = autoAnalyzeOn(); _aa.addEventListener('change', e => {
+  localStorage.setItem('ve.autoAna', e.target.checked ? '1' : '0');
+  status('结构分析: 导入时长素材自动分析 = ' + (e.target.checked ? '开' : '关'));
+}); }
 $('setSinkApply').addEventListener('click', () => { refreshSinks(); });
 $('setTest').addEventListener('click', () => {
   ensureAC();
@@ -1955,6 +2039,94 @@ function resizeCanvas() {
   return { w, h };
 }
 
+// ================= 音乐结构标记 (后端 analysis.py 的结果) =================
+// 分析数据里的时间是"源秒"; 这里映射到时间轴秒, 按置信度上色, 画在块【底部 11px】标记带
+// (块顶部 10px 是音量/淡化把手, 不能抢)。
+const ANA = new Map();          // srcPath -> analysis JSON
+const ANA_PEND = new Set();
+const MARK_H = 11;
+function analysisOf(c) { return (c && c.src) ? ANA.get(c.src) : null; }
+function barSecOf(a) { return (a && a.bpm > 0) ? (240.0 / a.bpm) : 2.0; }   // 4 拍/小节
+function markerTl(c, tSrc) {
+  const tl = c.start + (tSrc - c.offset) * c.stretch;
+  return (tl >= c.start - 1e-6 && tl <= c.start + c.length + 1e-6) ? tl : null;
+}
+function markersOf(c) {
+  const a = analysisOf(c);
+  if (!a || !a.transitionPoints || !a.transitionPoints.length) return [];
+  const out = [];
+  for (const p of a.transitionPoints) {
+    const tl = markerTl(c, p.time);
+    if (tl !== null) out.push({ tl, src: p.time, conf: p.confidence, type: p.type, why: p.why || {}, bar: p.bar });
+  }
+  return out;
+}
+function markerColor(conf) {          // 与需求文档的分档一致
+  if (conf >= 0.90) return '#ef4444'; // 红: 高置信 transition point
+  if (conf >= 0.70) return '#f97316'; // 橙: 很强结构变化
+  if (conf >= 0.50) return '#eab308'; // 黄: 较强
+  return '#3b82f6';                   // 蓝: 普通结构点
+}
+function markerAt(c, x) {
+  for (const m of markersOf(c)) if (Math.abs(t2x(m.tl) - x) <= 4) return m;
+  return null;
+}
+async function analyzeClip(c, loud) {
+  if (!c || !c.src) return;
+  if (ANA.has(c.src) || ANA_PEND.has(c.src)) return;
+  ANA_PEND.add(c.src);
+  if (loud) status('分析音乐结构… ' + baseName(c.src));
+  try {
+    const a = await post('/api/analyze', { path: c.src });
+    ANA.set(c.src, a);
+    if (a.warning) status('结构分析: ' + a.warning, true);
+    else status('结构分析完成: BPM ' + (+a.bpm).toFixed(1) + ' · ' + a.bars.length + ' 小节 · ' +
+                a.phrases.length + ' 乐句 · ' + a.transitionPoints.length + ' 个结构标记' +
+                (a.fromCache ? ' (缓存)' : '') + ' — 底部彩色标记可直接点着切');
+    invalidate();
+  } catch (e) {
+    status('结构分析失败: ' + e.message, true);
+  } finally {
+    ANA_PEND.delete(c.src);
+  }
+}
+function markerAtPlayhead() {         // 离播放头最近的结构标记 (M 键用)
+  let cands = selectionItems().filter(x => x.kind === 'audio').map(x => x.obj);
+  // 没选块时跟 S 键同一个兜底: 找播放头底下的块
+  if (!cands.length) cands = S.project.clips.filter(c => S.playhead > c.start && S.playhead < c.start + c.length);
+  let best = null;
+  for (const c of cands) {
+    for (const m of markersOf(c)) {
+      const d = Math.abs(m.tl - S.playhead);
+      if (!best || d < best.d) best = { d, c, m };
+    }
+  }
+  return (best && best.d < 8) ? best : null;
+}
+function splitClipRaw(c, tl) {        // 与 S 分割同一套字段处理 (供标记切分复用)
+  const leftLen = tl - c.start;
+  const right = JSON.parse(JSON.stringify(c));
+  right.id = uid();
+  right.start = tl;
+  right.offset = c.offset + leftLen / c.stretch;
+  right.length = c.length - leftLen;
+  right.render = null; right.renderKey = null;
+  c.length = leftLen; c.render = null; c.renderKey = null;
+  S.project.clips.push(right);
+  ensureRender(c); ensureRender(right);
+  return right;
+}
+function canSplitAt(c, tl) { return tl > c.start + 0.02 && tl < c.start + c.length - 0.02; }
+function splitClipAtMarker(c, m) {
+  if (!canSplitAt(c, m.tl)) return status('这个标记落在块边缘, 切不了', true);
+  pushUndo();
+  splitClipRaw(c, m.tl);
+  seek(m.tl);
+  invalidate();
+  if (S.playing) scheduleAll();
+  status('已在结构标记处切开 (Bar ' + m.bar + ' · 置信度 ' + Math.round(m.conf * 100) + '% · ' + m.type + ')');
+}
+
 async function peaksFor(path) {
   if (S.peaks.has(path)) return S.peaks.get(path);
   S.peaks.set(path, 'pending');
@@ -2082,6 +2254,28 @@ function draw() {
     g.fillRect(x0, y + 4, 5, ROW_H - 8);
     g.fillRect(x1 - 5, y + 4, 5, ROW_H - 8);
     // 块音量线 + 淡入淡出 (REAPER 式)
+    // ---- 结构标记带 (块底部): 小节刻度(暗蓝) + transition 标记(按置信度上色, 点它即切) ----
+    const _ana = analysisOf(c);
+    if (_ana && x1 - x0 > 6) {
+      const yb = y + ROW_H - 8;
+      if (barSecOf(_ana) * S.pps > 9) {
+        g.fillStyle = 'rgba(59,130,246,0.30)';
+        for (const b of (_ana.bars || [])) {
+          const tl = markerTl(c, b.start);
+          if (tl === null) continue;
+          const bx = t2x(tl);
+          if (bx < x0 + 1 || bx > x1 - 1) continue;
+          g.fillRect(bx, yb - 4, 1, 4);
+        }
+      }
+      for (const m of markersOf(c)) {
+        const mx = t2x(m.tl);
+        if (mx < x0 - 1 || mx > x1 + 1) continue;
+        g.fillStyle = markerColor(m.conf);
+        g.fillRect(mx, yb - MARK_H - 3, 1.5, MARK_H + 3);
+        g.beginPath(); g.arc(mx + 0.75, yb - MARK_H - 3, m.conf >= 0.7 ? 2.6 : 1.8, 0, 6.2832); g.fill();
+      }
+    }
     const vol = c.vol ?? 1;
     const clipTop = y + 4;
     const lineY = clipTop + 10 + (1 - vol) * (ROW_H - 30);

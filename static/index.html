@@ -85,12 +85,15 @@
     <button id="setSinkApply" title="重新枚举设备">刷新</button></div>
   <div class="srow"><span>测试</span><button id="setTest">播放测试音 (440Hz × 1.2s)</button></div>
   <div class="srow"><span></span><span id="setHint" class="hint2">—</span></div>
+  <div class="srow"><span>结构分析</span>
+    <label style="font-size:10px"><input type="checkbox" id="setAutoAna"> 导入长素材(&gt;25s)时自动分析音乐结构</label></div>
   <div class="ssec"></div>
   <div class="srow"><span>后端渲染</span><span id="setEngine" class="mono">—</span></div>
   <div class="srow"><span>数据目录</span><span id="setData" class="mono">—</span></div>
   <div class="srow"><span>端口 / 窗口</span><span id="setWin" class="mono">—</span></div>
   <button id="setClose" class="sclose">✕</button>
 </div>
+<div id="markTip"></div>
 <script src="/app.js"></script>
 </body>
 </html>

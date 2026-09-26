@@ -248,3 +248,11 @@ footer{height:var(--h-foot);flex:none;display:flex;align-items:center;gap:12px;p
   border-radius:2px;padding:4px 9px;cursor:pointer;font-size:11px}
 #setPanel button:hover{border-color:var(--accent)}
 #setPanel .sclose{position:absolute;top:7px;right:7px;padding:2px 7px}
+
+/* ============================ 结构标记悬停提示 ============================ */
+#markTip{position:fixed;display:none;z-index:80;background:rgba(18,22,29,.97);border:1px solid var(--border);
+  border-radius:3px;padding:7px 9px;font-size:11px;color:var(--text-dim);pointer-events:none;
+  box-shadow:0 4px 14px rgba(0,0,0,.7);max-width:242px;line-height:1.5}
+#markTip b{color:var(--text)}
+#markTip .mt-row{color:var(--text-mute);margin-top:2px}
+#markTip .mt-hint{margin-top:5px;color:var(--whip,#2dd4bf);font-size:10px}

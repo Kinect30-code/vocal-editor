@@ -10,6 +10,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+import analysis
 import dsp
 import numpy as np
 
@@ -19,6 +20,7 @@ import ve_env
 
 ve_env.ensure_dirs()
 ROOT = APP
+ANALYSIS = os.path.join(WORK, "analysis")   # 结构分析缓存 (key = 音频内容 hash)
 
 RENDER_VER = "r8"   # 渲染语义版本: 变更时递增, 客户端据此重渲染 (r8: FL 式滑音保持目标音高)
 LOCK = threading.Lock()
@@ -267,6 +269,11 @@ class H(BaseHTTPRequestHandler):
         return p
 
     def _dispatch(self, route, req):
+        if route == "/api/analyze":          # 音乐结构分析 (确定性信号分析; 按音频内容 hash 缓存)
+            p = self._audio(req.get("path", ""))
+            res, cached = analysis.analyze_cached(p, ANALYSIS)
+            res["fromCache"] = cached
+            return res
         if route == "/api/pick-file":        # 桌面端: 后端弹系统文件对话框, 返回选中的路径
             paths, err = _pick_files(str(req.get("kind", "audio")), bool(req.get("multi")))
             if err:
