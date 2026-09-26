@@ -9,6 +9,11 @@ DSP 是"分析 → 改参数 → 重合成"架构，
 渲染引擎优先级：**Rubber Band R3（装了 rubberband-cli 自动启用，真实人声最佳）> Praat PSOLA（当前默认）> WORLD**。
 建议安装：`sudo apt install rubberband-cli`（装完刷新页面自动切换，渲染缓存按引擎区分不会串味）。
 
+![界面截图](docs/screenshot.png)
+
+> 多轨时间线（素材块拖动/裁剪/拉伸/变调）· MIDI 参考轨 + 🌀 轨道路由接管（块标 [MIDI接管]）·
+> 轨道 FX 与参数包络（黄绿曲线）· MASTER 总线恒贴底部（可折叠，包络车道跟着贴底）
+
 ## 启动
 
 ```bash

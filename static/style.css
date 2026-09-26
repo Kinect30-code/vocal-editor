@@ -89,6 +89,7 @@ button{
 }
 button:hover{background:#2f3540;border-color:var(--border-2)}
 button:active{background:#1a1f28;box-shadow:var(--well)}
+#btnEnv.on{background:rgba(163,230,53,.18);border-color:#a3e635;color:#a3e635}
 
 select{background:var(--canvas);border:1px solid var(--border);color:var(--text-dim);
   border-radius:2px;padding:0 4px;height:22px;font:11px/1 var(--f-ui);cursor:pointer}
@@ -132,6 +133,7 @@ input[type=checkbox]:checked::after{content:'';position:absolute;left:3px;top:0p
 .ph-title{color:var(--text-mute);font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 #panel{flex:1;overflow:hidden;background:var(--surface-1);border-right:1px solid var(--border)}
 #tlWrap{flex:1;position:relative;min-width:0}
+
 #tl{display:block;width:100%;height:100%;cursor:default}
 #whipSvg{position:absolute;inset:0;pointer-events:none;z-index:30;width:100%;height:100%}
 #whipSvg path{fill:none;stroke:var(--whip);stroke-width:2;opacity:.95}
@@ -168,6 +170,14 @@ input[type=checkbox]:checked::after{content:'';position:absolute;left:3px;top:0p
 .trk .fxb.on{background:rgba(56,189,248,.16);border-color:var(--accent);color:var(--accent)}
 .trk .m.on{background:var(--mute);border-color:var(--mute);color:#fff}
 .trk .s.on{background:var(--solo);border-color:var(--solo);color:#12151a}
+
+/* ============================ MASTER 带 (恒贴底, 不随滚动) ============================ */
+#panelFlow{position:absolute;left:0;right:0;top:0;overflow:hidden}
+#panelRows{position:absolute;left:0;right:0;top:0}
+.trk.master{position:absolute;left:0;right:0;bottom:0;height:auto;overflow:hidden;
+  background:#1b2230;border-top:1px solid #46586e;border-bottom:none;border-left:4px solid #6084c0}
+.trk.master .mtitle{font:700 11px ui-monospace,monospace;color:#9dc0f0;letter-spacing:.5px}
+.trk.master .mfold{color:#9dc0f0}
 .trk .del{margin-left:4px;color:var(--text-mute)}
 .trk .del:hover{color:var(--err);border-color:var(--err)}
 .trk .whip{color:var(--whip);border-color:var(--border);background:rgba(45,212,191,.10);
@@ -199,15 +209,24 @@ footer{height:var(--h-foot);flex:none;display:flex;align-items:center;gap:12px;p
 .ctx-head{padding:3px 10px 5px;color:var(--text-mute);font-size:9px;font-weight:700;
   letter-spacing:.08em;text-transform:uppercase;border-bottom:1px solid var(--border);margin-bottom:3px}
 
-/* ============================ 浮层: 轨道 FX ============================ */
-#fxPop{position:fixed;display:none;background:var(--surface-2);border:1px solid var(--border);border-radius:2px;
-  padding:10px;z-index:55;width:236px;max-height:74vh;overflow:auto;box-shadow:0 4px 12px rgba(0,0,0,.65)}
+/* ============================ 浮层: 轨道 FX (居中独立窗口, 可拖动) ============================ */
+#fxPop{position:fixed;display:none;background:var(--surface-2);border:1px solid var(--border);border-radius:3px;
+  padding:0 10px 10px;z-index:55;width:392px;max-height:calc(100vh - 24px);overflow:auto;
+  box-shadow:0 14px 44px rgba(0,0,0,.66)}
+#fxPop .fxHead{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;cursor:move;user-select:none;
+  background:var(--surface-2);border-bottom:1px solid var(--border);margin:0 -10px 6px;padding:7px 6px 6px 10px}
+#fxPop .fxHead .fxTitle{flex:1;color:var(--accent);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+#fxPop .fxHead .fxClose{padding:0 6px;height:18px;font-size:11px;line-height:1;color:var(--text-dim);cursor:pointer}
+#fxPop .fxHead .fxClose:hover{color:var(--err);border-color:var(--err)}
 #fxPop h4{margin:0 0 8px;color:var(--accent);font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 #fxPop .fxsec{border-top:1px solid var(--border);margin-top:8px;padding-top:6px}
 #fxPop .frow{display:flex;align-items:center;gap:6px;margin:5px 0;color:var(--text-dim);font-size:10px;
   letter-spacing:.04em}
 #fxPop .frow input[type=range]{flex:1;min-width:0}
 #fxPop .frow label{font-size:11px;color:var(--text)}
+#fxPop .env-dia{background:transparent;border:none;color:var(--text-dim);cursor:pointer;font-size:11px;line-height:1;padding:0 2px;opacity:.6}
+#fxPop .env-dia.on{color:var(--accent);opacity:1;text-shadow:0 0 4px var(--accent)}
+#fxPop .env-dia:hover{opacity:1}
 
 /* ============================ 钢琴窗 (全屏浮层) ============================ */
 #prWrap{position:fixed;inset:0;background:var(--canvas);z-index:65;display:none;flex-direction:column}

@@ -2,8 +2,14 @@
    v4: 顶部菜单 / 拖放导入(ffmpeg通吃) / Alt+拖缘=拉伸·直接拖=裁剪 / B·N循环选区 / whip视觉重做 */
 'use strict';
 
+// ---- 错误钩子: 必须在最前面, 否则启动期抛异常时页面变砖且无人知道发生了什么 ----
+window.__errs = window.__errs || [];
+window.addEventListener('error', e => { window.__errs.push('ERR: ' + e.message + ' @ ' + (e.filename || '').split('/').pop() + ':' + e.lineno); if (window.__errs.length > 20) window.__errs.shift(); });
+window.addEventListener('unhandledrejection', e => { const r = e.reason; window.__errs.push('REJ: ' + (r && r.message ? r.message : r) + ' ||| ' + String(r && r.stack || '').split('\n').slice(0, 3).join(' <- ')); if (window.__errs.length > 20) window.__errs.shift(); });
+
 // ================= 状态 =================
-const RULER_H = 34, ROW_H = 88, EDGE = 12;
+const RULER_H = 34, ROW_H = 88, ENV_LANE_H = 56, EDGE = 12;
+const SCROLLBAR_H = 12;
 const S = {
   project: { bpm: 120, tracks: [], clips: [], midiClips: [], whips: [] },
   sel: null, multi: [],
@@ -15,6 +21,7 @@ const S = {
   undoStack: [], redoStack: [],
   drag: null, whip: null, dirty: true,
   clipboard: [], lastProj: null,
+  tool: 'select',   // 'select' | 'envelope' (REAPER 式包络绘制模式)
 };
 const $ = id => document.getElementById(id);
 const cv = $('tl'), ctx2d = cv.getContext('2d');
@@ -22,6 +29,7 @@ let AC = null, masterGain = null, active = [], monitorNodes = [];
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 const beat = () => 60 / (S.project.bpm || 120);
+let envSel = new Set();   // 选中的 FX 包络点: key = env.target + '|' + point.t + ',' + point.v (引用对象不稳定)
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const gridSec = () => S.grid.mode === 'beat' ? beat() * S.grid.div : S.grid.div;
 const baseName = p => p.split('/').pop();
@@ -62,10 +70,27 @@ function status(msg, isErr) {
 }
 function fixProject(p) {
   p.tracks = p.tracks || []; p.clips = p.clips || []; p.midiClips = p.midiClips || []; p.whips = p.whips || [];
+  // MASTER: 普通轨道身份的全局总线, 恒为最后一条, 不能被删/移动.
+  // 【必须保留存档里的 fx/env/collapsed】— 早期版本每次新建默认值 = 刷新后 master 的
+  // 效果与包络全丢, 用户会以为"包络没效果"。
+  const oldMaster = p.tracks.find(t => t.isMaster) || null;
+  p.tracks = p.tracks.filter(t => !t.isMaster);
+  const mfx = fxNorm(oldMaster && oldMaster.fx);
+  p.tracks.push({
+    id: 'MASTER', name: 'MASTER', isMaster: true,
+    vol: oldMaster ? oldMaster.vol : 1, pan: 0, mute: false, solo: false,
+    collapsed: !!(oldMaster && oldMaster.collapsed),
+    fx: mfx,
+    env: (oldMaster && Array.isArray(oldMaster.env)) ? oldMaster.env : [],
+  });
   const num = (v, def, lo, hi) => {
     v = parseFloat(v);
     return (typeof v === 'number' && isFinite(v)) ? clamp(v, lo, hi) : def;
   };
+  for (const t of p.tracks) {
+    if (!Array.isArray(t.env)) t.env = [];
+    t.fx = fxNorm(t.fx);   // 老工程可能缺 lowpass 等分组 → 补齐; 不补的话 anyFxOn/自动化会抛异常, 启动即死
+  }
   for (const c of p.clips) {
     c.start = num(c.start, 0, 0, 1e6);
     c.length = num(c.length, 1, 0.01, 1e6);
@@ -118,7 +143,7 @@ function afterProjectSwap(msg) {
 }
 function addTrack(name) {
   pushUndo();
-  S.project.tracks.push({ id: uid(), name: name || ('Track ' + (S.project.tracks.length + 1)), vol: 1, pan: 0, mute: false, solo: false });
+  pushTrackBeforeMaster({ id: uid(), name: name || ('Track ' + (S.project.tracks.length + 1)), vol: 1, pan: 0, mute: false, solo: false, env: [] });
   rebuildPanel(); drawBindings(); invalidate();
 }
 const trackById = id => S.project.tracks.find(t => t.id === id);
@@ -406,7 +431,7 @@ function refreshClipsOf(trackId) {   // 轨级属性变更 (自由变调轨) →
 // ================= 导入 (ffmpeg 通吃: mp3/m4s/mp4/webm/… + 拖放上传) =================
 function addClipFromImport(j, dispName) {
   let tr = (S.sel && S.sel.kind === 'audio' && clipById(S.sel.id)) ? trackById(clipById(S.sel.id).trackId) : S.project.tracks[0];
-  if (!tr) { S.project.tracks.push(tr = { id: uid(), name: 'Track 1', vol: 1, pan: 0, mute: false, solo: false }); rebuildPanel(); }
+  if (!tr) { pushTrackBeforeMaster(tr = { id: uid(), name: 'Track 1', vol: 1, pan: 0, mute: false, solo: false }); rebuildPanel(); }
   pushUndo();
   const c = {
     id: uid(), trackId: tr.id, src: j.path, render: null,
@@ -466,7 +491,7 @@ async function importByPath(kind, path) {
       const j = await post('/api/import-midi', { path });
       pushUndo();
       let tr = S.project.tracks.find(t => t.name === '参考MIDI' && S.project.midiClips.some(m => m.trackId === t.id));
-      if (!tr) S.project.tracks.push(tr = { id: uid(), name: '参考MIDI', vol: 1, pan: 0, mute: false, solo: false });
+      if (!tr) pushTrackBeforeMaster(tr = { id: uid(), name: '参考MIDI', vol: 1, pan: 0, mute: false, solo: false });
       const natural = Math.max(...j.notes.map(n => n.end));
       S.project.midiClips.push({ id: uid(), trackId: tr.id, name: name.replace(/\.[^.]+$/, ''),
                                  start: snapT(S.playhead), length: natural, notes: j.notes });
@@ -602,7 +627,7 @@ function whipStart(e, midiTrackId) {
     const el = document.elementFromPoint(ev.clientX, ev.clientY);
     const trk = el && el.closest('.trk');
     const tt = trk && trk.dataset.trackid ? trackById(trk.dataset.trackid) : null;
-    if (tt && tt.id !== midiTrackId && !tt.noTune) trk.classList.add('drop');   // 自由变调轨不接受接管
+    if (tt && tt.id !== midiTrackId && !tt.noTune && !tt.isMaster) trk.classList.add('drop');   // 自由变调轨/MASTER 不接受接管
     drawBindings();
   };
   const up = ev => {
@@ -626,8 +651,8 @@ function whipStart(e, midiTrackId) {
     } else if (el === cv || (el && cv.contains(el))) {
       droppedSomewhere = true;
       const r2 = cv.getBoundingClientRect();
-      const ti = Math.floor((ev.clientY - r2.top - RULER_H + S.scrollY) / ROW_H);
-      if (ti >= 0 && ti < S.project.tracks.length && S.project.tracks[ti].id !== from)
+      const ti = y2track(ev.clientY - r2.top);
+      if (ti >= 0 && ti < S.project.tracks.length && S.project.tracks[ti].id !== from && !S.project.tracks[ti].isMaster)
         targetId = S.project.tracks[ti].id;
     }
     if (targetId) {
@@ -765,7 +790,7 @@ function newProject() {
   pushUndo();
   S.project = fixProject({
     bpm: S.project.bpm || 120, clips: [], midiClips: [], whips: [],
-    tracks: [{ id: uid(), name: 'Track 1', vol: 1, pan: 0, mute: false, solo: false }],
+    tracks: [{ id: uid(), name: 'Track 1', vol: 1, pan: 0, mute: false, solo: false, env: [] }],
   });
   S.lastProj = null;
   $('projname').textContent = '';
@@ -784,10 +809,143 @@ async function loadDemo() {
 // ================= 坐标 / 命中 =================
 const t2x = t => t * S.pps - S.scrollX;
 const x2t = x => (x + S.scrollX) / S.pps;
-const trackY = i => RULER_H + i * ROW_H - S.scrollY;
+// ---- 可变轨道高度（基础 ROW_H + 展开的 FX 包络轨道） ----
+function trackVisibleEnvCount(t) {
+  if (!t) return 0;
+  if (t.isMaster && t.collapsed) return 0;          // 折叠 = 收起包络车道
+  return (t.env || []).filter(e => e.show).length;
+}
+// ---- MASTER 带: 恒贴视口底部, 不随滚动; 折叠后只剩一条窄条 ----
+const MASTER_COLLAPSED_H = 30;
+const masterOf = () => S.project.tracks.find(t => t.isMaster) || null;
+const masterIdx = () => S.project.tracks.findIndex(t => t.isMaster);
+function masterRowH() { const m = masterOf(); return (m && m.collapsed) ? MASTER_COLLAPSED_H : ROW_H; }
+function masterLanes() { const m = masterOf(); return (!m || m.collapsed) ? [] : (m.env || []).filter(e => e.show); }
+function masterBandH() { return masterRowH() + ENV_LANE_H * masterLanes().length; }
+function masterBandTop() { return Math.max(RULER_H, cv.clientHeight - SCROLLBAR_H - masterBandH()); }
+function rowHAt(i) { const t = S.project.tracks[i]; return (t && t.isMaster) ? masterRowH() : ROW_H; }
+function flowContentH() { let s = 0; for (const t of S.project.tracks) if (!t.isMaster) s += ROW_H + ENV_LANE_H * trackVisibleEnvCount(t); return s; }
+function flowRowsBottom() { return RULER_H - S.scrollY + flowContentH(); }
+function maxScrollY() { return Math.max(0, flowContentH() - (masterBandTop() - RULER_H)); }
+function clampScrollY() { S.scrollY = clamp(S.scrollY, 0, maxScrollY()); }
+function trackHeightAt(tOrI) {
+  const t = (typeof tOrI === 'number') ? S.project.tracks[tOrI] : tOrI;
+  if (t && t.isMaster) return masterBandH();
+  return ROW_H + ENV_LANE_H * trackVisibleEnvCount(t);
+}
+function trackY(i) {
+  const t = S.project.tracks[i];
+  if (t && t.isMaster) return masterBandTop();
+  let y = RULER_H - S.scrollY;
+  for (let k = 0; k < i; k++) if (!S.project.tracks[k].isMaster) y += trackHeightAt(k);
+  return y;
+}
 function y2track(y) {
-  const i = Math.floor((y - RULER_H + S.scrollY) / ROW_H);
-  return (i >= 0 && i < S.project.tracks.length) ? i : -1;
+  const mi = masterIdx();
+  if (mi >= 0 && y >= masterBandTop()) return mi;
+  let yy = RULER_H - S.scrollY;
+  for (let i = 0; i < S.project.tracks.length; i++) {
+    if (S.project.tracks[i].isMaster) break;
+    const h = trackHeightAt(i);
+    if (y >= yy && y < yy + h) return i;
+    yy += h;
+  }
+  return -1;
+}
+function y2trackFlow(y) {          // 素材落点用: MASTER 带不接受素材块
+  const ti = y2track(y);
+  return (ti >= 0 && S.project.tracks[ti].isMaster) ? -1 : ti;
+}
+function pushTrackBeforeMaster(tr) {
+  const mi = masterIdx();
+  if (mi < 0) S.project.tracks.push(tr); else S.project.tracks.splice(mi, 0, tr);
+  return tr;
+}
+function trackEnvLaneTop(ti, laneIdx) { return trackY(ti) + rowHAt(ti) + laneIdx * ENV_LANE_H; }
+function trackEnvLaneBottom(ti, laneIdx) { return trackEnvLaneTop(ti, laneIdx) + ENV_LANE_H; }
+function envLaneAtY(ti, y) {
+  const tr = S.project.tracks[ti];
+  if (!tr || (tr.isMaster && tr.collapsed)) return null;
+  const base = trackY(ti) + rowHAt(ti);
+  if (y < base) return null;
+  const lanes = (tr.env || []).filter(e => e.show);
+  const idx = Math.floor((y - base) / ENV_LANE_H);
+  return (idx >= 0 && idx < lanes.length) ? { idx, env: lanes[idx] } : null;
+}
+
+// ---- FX 参数包络定义 ----
+const FX_PARAM_DEFS = {
+  'lowpass.freq':   { label: '低通 截止', group: 'lowpass', min: 80, max: 18000, scale: 'log', cond: fx => fx.lowpass.on,
+                     apply: (ch, v, t) => { ch.lp.frequency.setTargetAtTime(v, t, 0.01); } },
+  'lowpass.q':      { label: '低通 共振', group: 'lowpass', min: 0.1, max: 12,    scale: 'lin', cond: fx => fx.lowpass.on,
+                     apply: (ch, v, t) => { ch.lp.Q.setTargetAtTime(v, t, 0.01); } },
+  'reverb.wet':     { label: '混响 湿声', group: 'reverb',  min: 0,  max: 1,     scale: 'lin', cond: fx => fx.reverb.on,
+                     apply: (ch, v, t) => { ch.rvWet.gain.setTargetAtTime(v, t, 0.01); } },
+  'chorus.depth':   { label: '合唱 深度', group: 'chorus',  min: 0,  max: 1,     scale: 'lin', cond: fx => fx.chorus.on,
+                     apply: (ch, v, t) => { ch.chWet.gain.setTargetAtTime(v, t, 0.01); ch.chDry.gain.setTargetAtTime(1 - v*0.5, t, 0.01); } },
+  'chorus.rate':    { label: '合唱 速率', group: 'chorus',  min: 0.1, max: 10,   scale: 'lin', cond: fx => fx.chorus.on,
+                     apply: (ch, v, t) => { ch.chLfo.frequency.setTargetAtTime(v, t, 0.01); } },
+  'exciter.amount': { label: '激励 量',   group: 'exciter', min: 0,  max: 1,     scale: 'lin', cond: fx => fx.exciter.on,
+                     apply: (ch, v, t) => { ch.exWet.gain.setTargetAtTime(v*0.5, t, 0.01); } },
+  'eq.low':         { label: 'EQ 低频',   group: 'eq',      min: -12, max: 12,   scale: 'lin',
+                     apply: (ch, v, t) => { ch.eqL.gain.setTargetAtTime(v, t, 0.01); } },
+  'eq.mid':         { label: 'EQ 中频',   group: 'eq',      min: -12, max: 12,   scale: 'lin',
+                     apply: (ch, v, t) => { ch.eqM.gain.setTargetAtTime(v, t, 0.01); } },
+  'eq.high':        { label: 'EQ 高频',   group: 'eq',      min: -12, max: 12,   scale: 'lin',
+                     apply: (ch, v, t) => { ch.eqH.gain.setTargetAtTime(v, t, 0.01); } },
+};
+function fxParamDef(target) { return FX_PARAM_DEFS[target]; }
+function paramValueForTarget(target, v01) {
+  const d = FX_PARAM_DEFS[target]; if (!d) return 0;
+  v01 = clamp(v01, 0, 1);
+  if (d.scale === 'log') return d.min * Math.pow(d.max / d.min, v01);
+  return d.min + v01 * (d.max - d.min);
+}
+function normForTarget(target, val) {
+  const d = FX_PARAM_DEFS[target]; if (!d) return 0;
+  val = clamp(val, d.min, d.max);
+  if (d.scale === 'log') return clamp(Math.log(val / d.min) / Math.log(d.max / d.min), 0, 1);
+  return (val - d.min) / (d.max - d.min);
+}
+function currentStaticFxValue(t, target) {
+  const fx = fxOf(t), [g, k] = target.split('.');
+  return fx[g] && fx[g][k];
+}
+function envValueAt(pts, t) {
+  if (!pts || !pts.length) return null;
+  const arr = pts.slice().sort((a, b) => a.t - b.t);
+  if (t <= arr[0].t) return arr[0].v;
+  for (let i = 1; i < arr.length; i++) if (t <= arr[i].t) {
+    const a = arr[i - 1], b = arr[i];
+    return a.v + (b.v - a.v) * ((t - a.t) / Math.max(1e-6, b.t - a.t));
+  }
+  return arr[arr.length - 1].v;
+}
+function envPointAt(env, ti, laneIdx, x, y, radius = 7) {
+  const top = trackEnvLaneTop(ti, laneIdx), bot = top + ENV_LANE_H;
+  for (const p of (env.points || [])) {
+    const px = t2x(p.t), py = bot - 8 - p.v * (ENV_LANE_H - 16);
+    if (Math.abs(px - x) <= radius && Math.abs(py - y) <= radius) return p;
+  }
+  return null;
+}
+function envNormFromY(ti, laneIdx, y) {
+  const top = trackEnvLaneTop(ti, laneIdx), bot = top + ENV_LANE_H;
+  return clamp((bot - 8 - y) / (ENV_LANE_H - 16), 0, 1);
+}
+function applyFxAutomation(t, ch, time, when) {
+  if (!t.env || !t.env.length || !ch) return;
+  const fx = fxOf(t);
+  when = when || AC.currentTime;
+  for (const env of t.env) {
+    if (!env.show) continue;                       // 包络轨道隐藏 → 交还静态参数控制 (否则面板滑杆被后台值压住, "参数没效果")
+    const def = FX_PARAM_DEFS[env.target];
+    if (!def) continue;
+    if (def.cond && !def.cond(fx)) continue;
+    const v01 = envValueAt(env.points, time);
+    if (v01 === null) continue;
+    def.apply(ch, paramValueForTarget(env.target, v01), when);
+  }
 }
 function snapT(t) {
   if (!S.snap) return Math.max(0, t);
@@ -806,12 +964,19 @@ function hitTest(x, y) {
   const ti = y2track(y);
   if (ti < 0) return { kind: 'empty' };
   const tr = S.project.tracks[ti];
+  if (tr.isMaster && y < masterBandTop() + masterRowH() && x <= 20) return { kind: 'masterFold', ti };   // 折叠箭头
+  const lane = envLaneAtY(ti, y);
+  if (lane) {
+    const near = envPointAt(lane.env, ti, lane.idx, x, y);
+    if (near) return { kind: 'envPoint', ti, lane: lane.idx, env: lane.env, pt: near, target: lane.env.target };
+    return { kind: 'envLane', ti, lane: lane.idx, env: lane.env, target: lane.env.target };
+  }
   const t = x2t(x);
   for (const c of [...S.project.clips].reverse()) {   // 后入数组 = 顶层 (与绘制层级一致), 重叠时命中上层块
     if (c.trackId !== tr.id) continue;
     const x0 = t2x(c.start), x1 = t2x(c.start + c.length);
     if (x >= x0 - 1 && x <= x1 + 1) {
-      const yTop = RULER_H + ti * ROW_H - S.scrollY + 4;
+      const yTop = trackY(ti) + 4;
       const relY = y - yTop;
       if (relY > (ROW_H - 8) - 12 && x1 - x0 > 8) {      // 块底部 12px = 结构标记带
         const mk = markerAt(c, x);
@@ -850,6 +1015,58 @@ cv.addEventListener('pointerdown', e => {
   const x = e.clientX - r.left, y = e.clientY - r.top;
   const h = hitTest(x, y);
   try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+  if (h.kind !== 'envLane' && h.kind !== 'envPoint' && envSel) { envSel = null; invalidate(); }
+  if (S.tool === 'envelope') {                       // 包络模式: 在素材块上画/改/删音量包络
+    if (e.button === 0 && h.kind === 'clip') { envPointerDown(h.clip, x, y); return; }
+    if (e.button === 2 && h.kind === 'clip') {
+      const idx = clipEnvPointAt(h.clip, x, y);
+      if (idx >= 0) { pushUndo(); envDeleteAt(h.clip, idx); if (S.playing) scheduleAll(); saveSoon(); invalidate(); S.suppressCtx = true; }
+      return;
+    }
+  }
+  if (h.kind === 'masterFold') {                     // MASTER 折叠/展开
+    const m = S.project.tracks[h.ti];
+    pushUndo(); m.collapsed = !m.collapsed; clampScrollY(); rebuildPanel(); drawBindings(); invalidate();
+    return;
+  }
+  // FX 参数包络轨道: 左键加点/拖点, 右键/双击删点, 右键拖拽=框选点
+  if (h.kind === 'envLane' || h.kind === 'envPoint') {
+    e.preventDefault();
+    const top = trackEnvLaneTop(h.ti, h.lane), bot = top + ENV_LANE_H;
+    const nearPt = h.kind === 'envPoint' ? h.pt : envPointAt(h.env, h.ti, h.lane, x, y);
+    // 右键: 点在点上=删除; 否则框选
+    if (e.button === 2) {
+      if (nearPt) {
+        pushUndo();
+        h.env.points = h.env.points.filter(p => p !== nearPt);
+        if (envSel && envSel.env === h.env) envSel.pts.delete(nearPt);
+        if (S.playing) scheduleAll(); saveSoon(); invalidate(); S.suppressCtx = true;
+      } else {
+        S.drag = { mode: 'fxEnvMarquee', env: h.env, ti: h.ti, lane: h.lane, x0: x, y0: y, x1: x, y1: y };
+        if (!e.shiftKey) envSel = null;
+      }
+      return;
+    }
+    // 左键: 点在点上=选中并拖动; 否则在线上加新点
+    const t = snapT(x2t(x));
+    const baseV = envValueAt(h.env.points, t) ?? normForTarget(h.target, currentStaticFxValue(S.project.tracks[h.ti], h.target));
+    pushUndo();
+    let pt;
+    if (nearPt) {
+      pt = nearPt;
+    } else {
+      pt = { t, v: clamp(baseV, 0, 1) };
+      h.env.points.push(pt);
+      h.env.points.sort((a, b) => a.t - b.t);
+    }
+    if (!envSel || envSel.env !== h.env) envSel = { env: h.env, pts: new Set() };
+    if (!e.shiftKey) envSel.pts.clear();
+    envSel.pts.add(pt);
+    S.drag = { mode: 'fxEnvPoint', env: h.env, pts: [...envSel.pts].map(p => ({ p, t0: p.t, v0: p.v })), ti: h.ti, lane: h.lane,
+               grabX: x, grabY: y };
+    if (S.playing) scheduleAll(); saveSoon(); invalidate(); return;
+  }
+
   // 右键拖拽框选 (任意非标尺位置起始; 无拖动=右键菜单)
   if (e.button === 2 && h.kind !== 'ruler') {
     S.drag = { mode: 'marquee', x0: x, y0: y, x1: x, y1: y, moved: false };
@@ -873,7 +1090,7 @@ cv.addEventListener('pointerdown', e => {
   }
   // Ctrl+拖空白处 = 凭空新建 MIDI 块
   if (e.ctrlKey && h.kind === 'empty' && !e.altKey) {
-    const ti0 = y2track(y);
+    const ti0 = y2trackFlow(y);
     if (ti0 >= 0) { S.drag = { mode: 'createmidi', ti: ti0, s0: Math.max(0, x2t(x)), cur: null }; status('松手创建 MIDI 块 (双击进钢琴窗画音符)'); invalidate(); return; }
   }
   if (h.kind === 'empty') {
@@ -928,6 +1145,9 @@ cv.addEventListener('pointermove', e => {
   const x = e.clientX - r.left, y = e.clientY - r.top;
   if (!S.drag) {
     const h = hitTest(x, y);
+    if (S.tool === 'envelope') { cv.style.cursor = (h.kind === 'clip') ? 'crosshair' : 'default'; return; }
+    if (h.kind === 'envLane') { cv.style.cursor = 'crosshair'; return; }
+    if (h.kind === 'envPoint') { cv.style.cursor = 'pointer'; return; }
     cv.style.cursor = (h.kind === 'clip' || h.kind === 'midi')
       ? (h.zone === 'body' ? (e.altKey ? 'ew-resize' : 'grab')
         : h.zone === 'vol' ? 'ns-resize'
@@ -952,20 +1172,20 @@ cv.addEventListener('pointermove', e => {
   }
   else if (d.mode === 'move') {
     const dt2 = t - d.grabT;
-    const ti = y2track(y);
+    const ti = y2trackFlow(y);                       // MASTER 带不接受素材
     const dRow = ti >= 0 ? ti - d.ti0 : 0;
     for (const g of d.group) {                      // 多选整组一起移动/换轨
       g.c.start = Math.max(0, sn(g.s0 + dt2));
       const ni = g.i0 + dRow;
-      if (ni >= 0 && ni < S.project.tracks.length) g.c.trackId = S.project.tracks[ni].id;
+      if (ni >= 0 && ni < S.project.tracks.length && !S.project.tracks[ni].isMaster) g.c.trackId = S.project.tracks[ni].id;
     }
     if (ti >= 0) d.c.trackId = S.project.tracks[ti].id;
     else {
       const n = S.project.tracks.length;
-      if (!d.createdTrack && y >= trackY(n) - 10) {
+      if (!d.createdTrack && y < masterBandTop() && y >= trackY(n) - 10) {
         d.createdTrack = true;   // REAPER 式: 拖到最后一行之下自动加轨
-        S.project.tracks.push({ id: uid(), name: 'Track ' + (n + 1), vol: 1, pan: 0, mute: false, solo: false });
-        d.c.trackId = S.project.tracks[n].id;
+        pushTrackBeforeMaster({ id: uid(), name: 'Track ' + (n + 1), vol: 1, pan: 0, mute: false, solo: false });
+        d.c.trackId = S.project.tracks[masterIdx() - 1].id;
         rebuildPanel(); drawBindings();
       }
     }
@@ -1009,14 +1229,48 @@ cv.addEventListener('pointermove', e => {
   else if (d.mode === 'fadeout') {
     d.c.fadeOut = clamp(d.c.start + d.c.length - x2t(x), 0, Math.min(d.c.length * 0.9, 4));
   }
+  else if (d.mode === 'envPoint') {                   // 拖动手绘包络点 (夹在相邻点之间保持顺序)
+    const i = d.c.env.indexOf(d.pt);
+    if (i < 0) { invalidate(); return; }
+    const loT = i > 0 ? d.c.env[i - 1].t + 1e-3 : 0;
+    const hiT = i < d.c.env.length - 1 ? d.c.env[i + 1].t - 1e-3 : d.c.length;
+    d.pt.t = clamp(x2t(x) - d.c.start, loT, hiT);
+    d.pt.g = clamp(envG(d.c, y), 0, 1);
+    if (S.playing) scheduleAll();
+    invalidate();
+  }
+  else if (d.mode === 'fxEnvPoint') {                 // 轨道 FX 参数包络点拖拽（可多选一起移动）
+    const dt = x2t(x) - x2t(d.grabX);
+    const dv = -(y - d.grabY) / (ENV_LANE_H - 16);
+    for (const it of d.pts) {
+      it.p.t = Math.max(0, snapT(it.t0 + dt));
+      it.p.v = clamp(it.v0 + dv, 0, 1);
+    }
+    d.env.points.sort((a, b) => a.t - b.t);
+    if (S.playing) scheduleAll();
+    invalidate();
+  }
+  else if (d.mode === 'fxEnvMarquee') {                 // 包络轨道右键框选
+    d.x1 = x; d.y1 = y;
+    if (envSel && envSel.env !== d.env) envSel = null;
+    const top = trackEnvLaneTop(d.ti, d.lane), bot = top + ENV_LANE_H;
+    const rect = { x: Math.min(d.x0, d.x1), y: Math.min(d.y0, d.y1), x2: Math.max(d.x0, d.x1), y2: Math.max(d.y0, d.y1) };
+    if (!envSel) envSel = { env: d.env, pts: new Set() };
+    for (const p of d.env.points) {
+      const px = t2x(p.t), py = bot - 8 - p.v * (ENV_LANE_H - 16);
+      const inRect = px >= rect.x && px <= rect.x2 && py >= rect.y && py <= rect.y2;
+      if (inRect) envSel.pts.add(p); else if (!e.shiftKey) envSel.pts.delete(p);
+    }
+    invalidate();
+  }
   else if (d.mode === 'midiMove') {
     const dt2 = t - d.grabT;
-    const ti = y2track(y);
+    const ti = y2trackFlow(y);                       // MASTER 带不接受素材
     const dRow = ti >= 0 ? ti - d.ti0 : 0;
     for (const g of d.group) {                      // 多选 MIDI 块整组移动
       g.c.start = Math.max(0, sn(g.s0 + dt2));
       const ni = g.i0 + dRow;
-      if (ni >= 0 && ni < S.project.tracks.length) g.c.trackId = S.project.tracks[ni].id;
+      if (ni >= 0 && ni < S.project.tracks.length && !S.project.tracks[ni].isMaster) g.c.trackId = S.project.tracks[ni].id;
     }
   }
   else if (d.mode === 'midiTrimL') {
@@ -1044,6 +1298,8 @@ cv.addEventListener('pointermove', e => {
 cv.addEventListener('pointerup', e => {
   if (!S.drag) return;
   const d = S.drag; S.drag = null;
+  if (d.mode === 'envPoint') { d.c.env.sort((a, b) => a.t - b.t); if (S.playing) scheduleAll(); saveSoon(); invalidate(); return; }
+  if (d.mode === 'fxEnvPoint' || d.mode === 'fxEnvMarquee') { if (d.env && d.env.points) d.env.points.sort((a, b) => a.t - b.t); if (S.playing) scheduleAll(); saveSoon(); invalidate(); return; }
   if (d.mode === 'createmidi') {
     const t = S.project.tracks[d.ti];
     pushUndo();
@@ -1119,7 +1375,13 @@ cv.addEventListener('pointermove', e => {
 });
 cv.addEventListener('dblclick', e => {
   const r2 = cv.getBoundingClientRect();
-  const h = hitTest(e.clientX - r2.left, e.clientY - r2.top);
+  const x = e.clientX - r2.left, y = e.clientY - r2.top;
+  const h = hitTest(x, y);
+  if (S.tool === 'envelope' && h.kind === 'clip') {
+    const idx = clipEnvPointAt(h.clip, x, y);
+    if (idx >= 0) { pushUndo(); envDeleteAt(h.clip, idx); if (S.playing) scheduleAll(); saveSoon(); invalidate(); }
+    return;
+  }
   if (h.kind === 'midi') prOpen(h.clip);
 });
 cv.addEventListener('contextmenu', e => {
@@ -1258,7 +1520,7 @@ cv.addEventListener('wheel', e => {
     S.pps = clamp(S.pps * (e.deltaY < 0 ? 1.15 : 1 / 1.15), 4, 2000);
     S.scrollX = Math.max(0, tAnchor * S.pps - x);
   } else if (e.shiftKey) {
-    S.scrollY = clamp(S.scrollY + e.deltaY, 0, Math.max(0, S.project.tracks.length * ROW_H - (cv.clientHeight - RULER_H)));
+    S.scrollY = clamp(S.scrollY + e.deltaY, 0, maxScrollY());
   } else {
     S.scrollX = Math.max(0, S.scrollX + e.deltaY * 0.8);
   }
@@ -1294,9 +1556,15 @@ document.addEventListener('keydown', e => {
     if (b) splitClipAtMarker(b.c, b.m);
     else status('播放头附近没有结构标记 — 右键块 → "分析音乐结构"', true);
   }
+  else if (e.key === 'v' || e.key === 'V') { toggleEnvelope(); }   // REAPER 习惯: V 激活/退出音量包络
   else if (e.key === 'b' || e.key === 'B') { S.loop.a = S.playhead; syncLoop(); }
   else if (e.key === 'n' || e.key === 'N') { S.loop.b = S.playhead; syncLoop(); }
-  else if (e.key === 'Escape') { if (PR.open) { prClose(); return; } select(null); invalidate(); }
+  else if (e.key === 'Escape') {
+    const fp = $('fxPop');
+    if (fp && fp.style.display === 'block') { fxPopHide(); return; }   // 先关 FX 浮窗, 免得顺手把选中也清了
+    if (PR.open) { prClose(); return; }
+    select(null); invalidate();
+  }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') { if (selectionItems().length) { e.preventDefault(); copySel(false); } }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') { if (selectionItems().length) { e.preventDefault(); copySel(true); } }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') { if (S.clipboard.length) { e.preventDefault(); paste(); } }
@@ -1515,13 +1783,21 @@ function psBufferFor(spec) {
 }
 // ===== 轨道 FX 链 (EQ3 / 合唱 / 混响 / 激励器 — 模式参考 Tone.js Effect) =====
 const trackChains = new Map();
+const FX_DEF = {
+  eq: { low: 0, mid: 0, high: 0 },
+  chorus: { on: false, depth: 0.4, rate: 1.5 },
+  reverb: { on: false, wet: 0.22, decay: 1.7 },
+  exciter: { on: false, amount: 0.35 },
+  lowpass: { on: false, freq: 4000, q: 0.707 },
+};
+function fxNorm(fx) {          // 深合并: 分组缺失/分组内字段缺失都补齐 (老工程兼容)
+  const out = {};
+  fx = (fx && typeof fx === 'object') ? fx : {};
+  for (const k of Object.keys(FX_DEF)) out[k] = Object.assign({}, FX_DEF[k], (fx[k] && typeof fx[k] === 'object') ? fx[k] : {});
+  return out;
+}
 function fxOf(t) {
-  return t.fx || (t.fx = {
-    eq: { low: 0, mid: 0, high: 0 },
-    chorus: { on: false, depth: 0.4, rate: 1.5 },
-    reverb: { on: false, wet: 0.22, decay: 1.7 },
-    exciter: { on: false, amount: 0.35 },
-  });
+  return t.fx || (t.fx = fxNorm(null));
 }
 function makeIR(decay) {
   const len = Math.max(1, Math.floor(AC.sampleRate * decay));
@@ -1548,6 +1824,8 @@ function ensureTrackChain(t) {
   const eqM = AC.createBiquadFilter(); eqM.type = 'peaking'; eqM.frequency.value = 2500; eqM.Q.value = 1;
   const eqH = AC.createBiquadFilter(); eqH.type = 'highshelf'; eqH.frequency.value = 8000;
   node.connect(eqL); eqL.connect(eqM); eqM.connect(eqH); node = eqH;
+  const lp = AC.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = fx.lowpass.freq; lp.Q.value = fx.lowpass.q;
+  node.connect(lp); node = lp;
   // 合唱: 干 + LFO调制延迟 (Tone.Chorus 简化单声道版)
   const chDry = AC.createGain(), chWet = AC.createGain();
   const chSum = AC.createGain();
@@ -1573,8 +1851,15 @@ function ensureTrackChain(t) {
   exDry.connect(exSum); exWet.connect(exSum); node = exSum;
   const out = AC.createGain();
   const pan = AC.createStereoPanner();
-  node.connect(out); out.connect(pan); pan.connect(masterGain);
-  ch = { input, out, pan, eqL, eqM, eqH, chWet, chDry, chLfo, rvWet, rvDry, conv, exWet, exDry, exSh };
+  node.connect(out); out.connect(pan);
+  if (t.isMaster) {                       // MASTER 总线: 音量在前级 masterGain, FX 后直连输出
+    pan.connect(AC.destination);
+    masterGain.connect(input);
+  } else {
+    pan.connect(masterGain);
+  }
+  if (t.isMaster) out.gain.value = 1;
+  ch = { input, out, pan, eqL, eqM, eqH, lp, chWet, chDry, chLfo, rvWet, rvDry, conv, exWet, exDry, exSh };
   trackChains.set(t.id, ch);
   applyFxParams(t, ch);
   return ch;
@@ -1582,6 +1867,8 @@ function ensureTrackChain(t) {
 function applyFxParams(t, ch) {
   const fx = fxOf(t);
   ch.eqL.gain.value = fx.eq.low; ch.eqM.gain.value = fx.eq.mid; ch.eqH.gain.value = fx.eq.high;
+  ch.lp.frequency.value = fx.lowpass.on ? fx.lowpass.freq : AC.sampleRate / 2;
+  ch.lp.Q.value = fx.lowpass.q;
   ch.chWet.gain.value = fx.chorus.on ? fx.chorus.depth : 0;
   ch.chDry.gain.value = fx.chorus.on ? 1 - fx.chorus.depth * 0.5 : 1;
   ch.chLfo.frequency.value = fx.chorus.rate;
@@ -1595,6 +1882,7 @@ function stopSources() {
     try { a.src.stop(); } catch (e) {}
     try { a.src.disconnect(); } catch (e) {}
     try { a.gEnv && a.gEnv.disconnect(); } catch (e) {}
+    try { a.gPen && a.gPen.disconnect(); } catch (e) {}
     try { a.gClip && a.gClip.disconnect(); } catch (e) {}
   }
   active = [];
@@ -1748,12 +2036,38 @@ function scheduleMonitor() {   // 钢琴窗试听: chip 方波, 仅编辑器内,
   o2.start(t0); o2.stop(t0 + dur + 0.02);
   monitorNodes.push(o2);
 }
+
+// ================= 包络 (REAPER 式: 每个素材块一条可手绘的音量包络) =================
+const ENV_COLOR = '#a3e635';
+function clipEnvTop(c){ const ti = S.project.tracks.findIndex(t => t.id === c.trackId); return trackY(ti) + 6; }
+function clipEnvBot(c){ const ti = S.project.tracks.findIndex(t => t.id === c.trackId); return trackY(ti) + ROW_H - 6; }
+function envY(c, g){ const t = clipEnvTop(c), b = clipEnvBot(c); return b - clamp(g, 0, 1) * (b - t); }
+function envG(c, yy){ const t = clipEnvTop(c), b = clipEnvBot(c); return clamp((b - yy) / (b - t), 0, 1); }
+function clipEnvPointAt(c, x, y){          // 素材块音量包络: 返回下标 (勿与轨道FX包络的 envPointAt 混用)
+  if (!c.env) return -1;
+  for (let i = 0; i < c.env.length; i++) {
+    const px = t2x(c.start + c.env[i].t), py = envY(c, c.env[i].g);
+    if (Math.abs(px - x) <= 7 && Math.abs(py - y) <= 7) return i;
+  }
+  return -1;
+}
+function envAddOrPick(c, x, y){
+  if (!c.env) c.env = [];
+  const idx = clipEnvPointAt(c, x, y);
+  if (idx >= 0) return c.env[idx];
+  const pt = { t: clamp(x2t(x) - c.start, 0, c.length), g: envG(c, y) };
+  c.env.push(pt); c.env.sort((a, b) => a.t - b.t);
+  return pt;
+}
+function envDeleteAt(c, idx){ c.env.splice(idx, 1); if (!c.env.length) delete c.env; }
+function envPointerDown(c, x, y){ pushUndo(); const pt = envAddOrPick(c, x, y); S.drag = { mode: 'envPoint', c, pt }; invalidate(); }
+
 function scheduleAll() {
   stopSources();
   if (!AC) return;
   const now = AC.currentTime, pos = S.startPos;
   for (const c of S.project.clips) {
-   let t = null, info = null, buf = null, when = 0, bufOffset = 0, dur = 0, pbRate = 1, src = null, gClip = null, gEnv = null, chain = null;
+   let t = null, info = null, buf = null, when = 0, bufOffset = 0, dur = 0, pbRate = 1, src = null, gClip = null, gEnv = null, gPen = null, chain = null;
    try {
     t = trackById(c.trackId);
     info = clipBufferInfo(c);
@@ -1783,7 +2097,8 @@ function scheduleAll() {
     gEnv = AC.createGain();                    // 淡入淡出包络 (归一化 0~1, 与块音量分离)
     gClip = AC.createGain();                   // 块音量 (实时可改, 不再覆盖包络)
     chain = ensureTrackChain(t);
-    src.connect(gEnv); gEnv.connect(gClip); gClip.connect(chain.input);   // → FX链 → 声像 → 总线
+    gPen = AC.createGain(); gPen.gain.value = 1;            // 手绘音量包络 (REAPER 式 take volume envelope)
+    src.connect(gEnv); gEnv.connect(gPen); gPen.connect(gClip); gClip.connect(chain.input);   // → FX链 → 声像 → 总线
     if (pbRate !== 1) src.playbackRate.value = pbRate;
     gClip.gain.value = c.vol ?? 1;
     // 淡入淡出包络 (用户设的 + 同轨重叠的自动交叉淡化)
@@ -1811,13 +2126,21 @@ function scheduleAll() {
       gEnv.gain.setValueAtTime(vAt(inPos), Tin(inPos));
       for (const [tt, vv] of pts) if (tt > inPos + 1e-4) gEnv.gain.linearRampToValueAtTime(vv, Tin(Math.min(tt, clipEnd)));
     }
+    if (c.env && c.env.length) {                          // 手绘音量包络 (REAPER 式): 直接作用在 gPen 节点上
+      const ev = c.env.map(p => [c.start + clamp(p.t, 0, c.length), clamp(p.g, 0, 1)]).sort((a, b) => a[0] - b[0]);
+      if (ev[0][0] > clipStart + 1e-4) ev.unshift([clipStart, ev[0][1]]);
+      if (ev[ev.length - 1][0] < clipEnd - 1e-4) ev.push([clipEnd, ev[ev.length - 1][1]]);
+      const vAt = tq => { if (tq <= ev[0][0]) return ev[0][1]; for (let i = 1; i < ev.length; i++) { if (tq <= ev[i][0]) { const [ta, va] = ev[i - 1], [tb, vb] = ev[i]; return va + (vb - va) * ((tq - ta) / Math.max(1e-6, tb - ta)); } } return ev[ev.length - 1][1]; };
+      gPen.gain.setValueAtTime(vAt(inPos), Tin(inPos));
+      for (const [tt, vv] of ev) if (tt > inPos + 1e-4) gPen.gain.linearRampToValueAtTime(vv, Tin(Math.min(tt, clipEnd)));
+    }
     if (wrapLoop) {   // 循环源: 用 stop 收尾 (duration 参数在 loop 下不可靠)
       src.start(now + when + 0.02, bufOffset);
       src.stop(now + when + 0.02 + dur + 0.02);
     } else {
       src.start(now + when + 0.02, bufOffset, Math.min(dur * pbRate, buf.duration - bufOffset));
     }
-    active.push({ src, gEnv, gClip, chain, trackId: t.id, clip: c });
+    active.push({ src, gEnv, gPen, gClip, chain, trackId: t.id, clip: c });
    } catch (err) {
     const sv = v => (typeof v === 'number' && isFinite(v)) ? +v.toFixed(3) : String(v);
     if (!window.__schedErrs) window.__schedErrs = [];
@@ -1826,17 +2149,26 @@ function scheduleAll() {
     status('块 "' + (c.name || '?') + '" 调度失败已跳过: ' + err.message, true);
    }
   }
+  // 初始化各轨 FX 参数包络在起始位置的值
+  for (const tr of S.project.tracks) {
+    const ch = trackChains.get(tr.id);
+    if (ch) applyFxAutomation(tr, ch, pos, now + 0.02);
+  }
   scheduleMonitor();
   applyMixLive();
 }
-function applyMixLive() {   // 实时参数更新 (音量/声像/M/S): 只碰"常数"节点, 不碰自动化里的包络
+function applyMixLive() {   // 实时参数更新 (音量/声像/M/S + FX 包络): 不碰自动化里的块包络
   for (const a of active) {
     const t = trackById(a.trackId);
     if (!t) continue;
     if (a.chain) { a.chain.out.gain.value = trackGain(t); a.chain.pan.pan.value = clamp(t.pan, -1, 1); }
     if (a.gClip && a.clip) a.gClip.gain.value = (a.clip.vol ?? 1);   // gClip 只装块音量, 包络在 gEnv
+    if (t && a.chain && t.env && t.env.length) applyFxAutomation(t, a.chain, curPos());
   }
   if (masterGain) masterGain.gain.value = parseFloat($('master').value);
+  const mtr = S.project.tracks.find(t => t.isMaster);
+  if (mtr && AC) ensureTrackChain(mtr);   // 保证 MASTER 链存在 (FX/包络可听)
+
 }
 function pendingRenders() { return S.project.clips.filter(c => c._pend).length; }
 function play() {
@@ -1943,7 +2275,9 @@ function trackDragStart(e, t) {
     ins.remove();
     if (dragRow) dragRow.classList.remove('dragging');
     const from = S.project.tracks.indexOf(t);
-    const to = clamp(k > from ? k - 1 : k, 0, S.project.tracks.length - 1);
+    const miR = masterIdx();
+    const maxTo = miR >= 0 ? miR - 1 : S.project.tracks.length - 1;   // 普通轨道只能在 MASTER 之上重排
+    const to = clamp(k > from ? k - 1 : k, 0, Math.max(0, maxTo));
     if (to === from) return;
     pushUndo();
     S.project.tracks.splice(from, 1);
@@ -1960,11 +2294,51 @@ function trackDragStart(e, t) {
 function rebuildPanel() {
   const panel = $('panel');
   panel.innerHTML = '';
+  // 结构: #panel > #panelFlow(裁剪到 master 带以上) > #panelRows(整体随 scrollY 平移) + .trk.master(绝对贴底)
+  const flow = document.createElement('div');
+  flow.id = 'panelFlow';
+  flow.style.bottom = (masterBandH() + SCROLLBAR_H) + 'px';
+  const rows = document.createElement('div');
+  rows.id = 'panelRows';
+  flow.appendChild(rows);
+  panel.appendChild(flow);
+  let masterDiv = null;
   for (const t of S.project.tracks) {
     const hasMidi = S.project.midiClips.some(m => m.trackId === t.id);
     const div = document.createElement('div');
-    div.className = 'trk';
+    div.className = 'trk' + (t.isMaster ? ' master' : '');
     div.dataset.trackid = t.id;
+    if (t.isMaster) {
+      div.style.height = masterBandH() + 'px';
+      div.style.bottom = SCROLLBAR_H + 'px';   // 与画布带对齐 (画布底部留了横向滚动条高度)
+      div.innerHTML = `
+        <div class="row2">
+          <button class="mfold" title="折叠/展开 MASTER (展开时包络车道贴在它下面, 一起贴底)">${t.collapsed ? '▶' : '▼'}</button>
+          <span class="mtitle">MASTER</span><button class="fxb ${anyFxOn(t) ? 'on' : ''}" data-track="${t.id}">FX</button>
+        </div>
+        ${t.collapsed ? '' : `<div class="row2"><span class="vol">音量<input type="range" min="0" max="1.5" step="0.01" value="${parseFloat($('master').value)}"></span></div>
+        <div class="row2"><span class="pan" style="visibility:hidden">声道</span></div>`}`;
+      div.querySelector('.mfold').addEventListener('click', e => {
+        e.stopPropagation(); pushUndo(); t.collapsed = !t.collapsed; clampScrollY();
+        rebuildPanel(); drawBindings(); invalidate();
+      });
+      const volIn = div.querySelector('.vol input');
+      if (volIn) volIn.addEventListener('input', e => {
+        $('master').value = e.target.value;   // 与工具栏总音量同一参数
+        applyMixLive(); invalidate();
+      });
+      const fxbM = div.querySelector('.fxb');
+      if (fxbM) fxbM.addEventListener('click', e => {
+        e.stopPropagation();
+        const pop = $('fxPop');
+        const opening = pop.style.display !== 'block' || pop.dataset.track !== t.id;
+        pop.style.display = 'none';
+        if (opening) openFxPop(t, fxbM);
+      });
+      masterDiv = div;
+      continue;
+    }
+    div.style.height = trackHeightAt(t) + 'px';
     // 被 whip 接管的轨道: 左侧 4px 竖条变浅绿 (连线的替代标记)
     div.style.setProperty('--tag', S.project.whips.some(w => w.targetTrackId === t.id) ? '#86efac' : trackHue(t));
     div.innerHTML = `
@@ -2027,8 +2401,9 @@ function rebuildPanel() {
         removeWhipsOf(t.id);
       });
     }
-    panel.appendChild(div);
+    rows.appendChild(div);
   }
+  if (masterDiv) panel.appendChild(masterDiv);      // MASTER 行最后挂, 绝对定位贴底
 }
 
 // ================= 绘制 =================
@@ -2125,6 +2500,12 @@ function splitClipRaw(c, tl) {        // 与 S 分割同一套字段处理 (供�
   right.length = c.length - leftLen;
   right.render = null; right.renderKey = null;
   c.length = leftLen; c.render = null; c.renderKey = null;
+  if (c.env) {                                       // 包络点随拆分平移到各自的块时间基准
+    const le = c.env.filter(p => p.t <= leftLen + 1e-4).map(p => ({ t: p.t, g: p.g }));
+    const re = c.env.filter(p => p.t >= leftLen - 1e-4).map(p => ({ t: p.t - leftLen, g: p.g }));
+    c.env = le.length ? le : undefined;
+    right.env = re.length ? re : undefined;
+  }
   S.project.clips.push(right);
   ensureRender(c); ensureRender(right);
   return right;
@@ -2172,11 +2553,15 @@ function fmtPos(t) {
 
 function draw() {
   const { w, h } = resizeCanvas();
+  clampScrollY();                     // master 带高度/折叠变化后, 滚动量以最新可用高度为准
   const g = ctx2d;
   g.clearRect(0, 0, w, h);
   g.fillStyle = '#12151a'; g.fillRect(0, 0, w, h);
-  // 轨道面板与时间线垂直同步
-  $('panel').style.transform = 'translateY(' + (-S.scrollY) + 'px)';
+  // 轨道面板与时间线垂直同步 (只平移普通轨道层, MASTER 行绝对贴底不动)
+  const pRows = $('panelRows');
+  if (pRows) pRows.style.transform = 'translateY(' + (-S.scrollY) + 'px)';
+  const pFlow = $('panelFlow');
+  if (pFlow) pFlow.style.bottom = (masterBandH() + SCROLLBAR_H) + 'px';
 
   // ---- 标尺 + 网格 ----
   g.fillStyle = '#161a22'; g.fillRect(0, 0, w, RULER_H);
@@ -2210,14 +2595,80 @@ function draw() {
     g.fillRect(xa - 1, 0, 3, RULER_H); g.fillRect(xb - 2, 0, 3, RULER_H);
   }
 
-  // ---- 轨道行 ----
+  // ---- 轨道行 + FX 包络轨道 ----
+  const mi = masterIdx();
+  const mbTop = masterBandTop();
+  const drawTrackRow = (i, y, th) => {
+    const t = S.project.tracks[i];
+    g.fillStyle = t.isMaster ? '#1b2230' : (i % 2 ? '#161a22' : '#12161d');
+    g.fillRect(0, y, w, th);
+    g.strokeStyle = t.isMaster ? '#46586e' : '#2b3342';
+    g.beginPath(); g.moveTo(0, y + th); g.lineTo(w, y + th); g.stroke();
+    if (t.isMaster) {          // 贴底 MASTER 行: 折叠箭头 + 标签 (包络车道画在它下面, 一起贴底)
+      const rh = masterRowH();
+      g.fillStyle = 'rgba(96,140,220,0.10)'; g.fillRect(0, y, w, rh);
+      g.textBaseline = 'middle';
+      g.font = '11px system-ui';
+      g.fillStyle = '#8fb3e8';
+      g.fillText(t.collapsed ? '▶' : '▼', 5, y + rh / 2);
+      g.font = '700 11px ui-monospace,monospace';
+      g.fillStyle = '#9dc0f0';
+      g.fillText('MASTER', 20, y + rh / 2);
+      if (t.collapsed) return;
+    }
+    // 包络轨道
+    const lanes = (t.isMaster && t.collapsed) ? [] : (t.env || []).filter(e => e.show);
+    for (let li = 0; li < lanes.length; li++) {
+      const env = lanes[li];
+      const def = FX_PARAM_DEFS[env.target];
+      const top = y + rowHAt(i) + li * ENV_LANE_H;
+      const bot = top + ENV_LANE_H;
+      g.fillStyle = li % 2 ? '#141821' : '#12151a';
+      g.fillRect(0, top, w, ENV_LANE_H);
+      g.strokeStyle = '#2b3342';
+      g.beginPath(); g.moveTo(0, top); g.lineTo(w, top); g.stroke();
+      g.fillStyle = '#6b7686'; g.font = '10px ui-monospace,monospace'; g.textBaseline = 'top';
+      g.fillText((def ? def.label : env.target), 6, top + 4);
+      // 曲线（无点时画当前静态值的基准线；有则按点插值）
+      const pts = (env.points || []).slice().sort((a, b) => a.t - b.t);
+      const py = v => bot - 8 - clamp(v, 0, 1) * (ENV_LANE_H - 16);
+      const vAt = tq => envValueAt(pts, tq) ?? normForTarget(env.target, currentStaticFxValue(t, env.target));
+      g.strokeStyle = '#a3e635'; g.lineWidth = 1.5;
+      g.beginPath();
+      const t0 = x2t(0), t1 = x2t(w);
+      const step = Math.max(0.01, (t1 - t0) / Math.min(200, w / 2));
+      let first = true;
+      for (let tt = t0; tt <= t1; tt += step) {
+        const xx = t2x(tt), yy = py(vAt(tt));
+        if (first) { g.moveTo(xx, yy); first = false; }
+        else g.lineTo(xx, yy);
+      }
+      g.stroke();
+      // 点 + 选中高亮
+      const sel = (envSel && envSel.env === env) ? envSel.pts : null;
+      for (const p of pts) {
+        const px = t2x(p.t), pyv = py(p.v);
+        const isSelPt = sel && sel.has(p);
+        g.fillStyle = isSelPt ? '#f43f5e' : '#a3e635';
+        g.fillRect(px - (isSelPt ? 3.5 : 2.5), pyv - (isSelPt ? 3.5 : 2.5), isSelPt ? 7 : 5, isSelPt ? 7 : 5);
+      }
+      // 框选矩形（包络轨道内右键拖拽）
+      if (S.drag && S.drag.mode === 'fxEnvMarquee' && S.drag.ti === i && S.drag.lane === li) {
+        const d = S.drag;
+        g.strokeStyle = '#3b82f6'; g.setLineDash([4, 3]);
+        g.strokeRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0));
+        g.setLineDash([]);
+      }
+    }
+  };
+  // 普通轨道裁剪在 MASTER 带之上 (master 恒贴底, 不允许被滚上来的行盖住)
+  g.save();
+  g.beginPath(); g.rect(0, RULER_H, w, Math.max(0, mbTop - RULER_H)); g.clip();
   for (let i = 0; i < S.project.tracks.length; i++) {
-    const y = trackY(i);
-    if (y + ROW_H < RULER_H || y > h) continue;
-    g.fillStyle = i % 2 ? '#161a22' : '#12161d';
-    g.fillRect(0, y, w, ROW_H);
-    g.strokeStyle = '#2b3342';
-    g.beginPath(); g.moveTo(0, y + ROW_H); g.lineTo(w, y + ROW_H); g.stroke();
+    if (i === mi) continue;
+    const y = trackY(i), th = trackHeightAt(i);
+    if (y + th < RULER_H || y > mbTop) continue;
+    drawTrackRow(i, y, th);
   }
 
   // ---- 音频块 ----
@@ -2225,7 +2676,7 @@ function draw() {
     const ti = S.project.tracks.findIndex(t => t.id === c.trackId);
     if (ti < 0) continue;
     const y = trackY(ti);
-    if (y + ROW_H < RULER_H || y > h) continue;
+    if (y + trackHeightAt(ti) < RULER_H || y > h) continue;
     const x0 = t2x(c.start), x1 = t2x(c.start + c.length);
     if (x1 < 0 || x0 > w) continue;
     const muted = trackGain(S.project.tracks[ti]) <= 1e-6;   // 静音/被独奏压掉 → 整块变暗
@@ -2345,6 +2796,20 @@ function draw() {
     g.fillStyle = 'rgba(255,255,255,0.85)';
     g.fillRect(x0 + 1, lineY - 3, 7, 6);
     g.fillRect(x1 - 8, lineY - 3, 7, 6);
+    // 手绘音量包络 (REAPER 式 take volume envelope)
+    if (c.env && c.env.length) {
+      const et = clipEnvTop(c), eb = clipEnvBot(c);
+      const pts = c.env.map(p => [t2x(c.start + clamp(p.t, 0, c.length)), eb - clamp(p.g, 0, 1) * (eb - et)])
+        .filter(([px]) => px >= x0 - 30 && px <= x1 + 30);
+      if (pts.length) {
+        g.strokeStyle = 'rgba(163,230,53,0.45)'; g.lineWidth = 1;
+        g.beginPath(); g.moveTo(x0, et); g.lineTo(x1, et); g.stroke();   // 单元度参考线 (g=1)
+        g.strokeStyle = ENV_COLOR; g.lineWidth = 1.5;
+        g.beginPath(); pts.forEach(([px, py], i) => i ? g.lineTo(px, py) : g.moveTo(px, py)); g.stroke();
+        g.fillStyle = ENV_COLOR;
+        for (const [px, py] of pts) g.fillRect(px - 2.5, py - 2.5, 5, 5);
+      }
+    }
     g.globalAlpha = 1;
   }
 
@@ -2353,7 +2818,7 @@ function draw() {
     const ti = S.project.tracks.findIndex(t => t.id === m.trackId);
     if (ti < 0) continue;
     const y = trackY(ti);
-    if (y + ROW_H < RULER_H || y > h) continue;
+    if (y + trackHeightAt(ti) < RULER_H || y > h) continue;
     const x0 = t2x(m.start), x1 = t2x(m.start + m.length);
     if (x1 < 0 || x0 > w) continue;
     const muted = trackGain(S.project.tracks[ti]) <= 1e-6;
@@ -2383,6 +2848,8 @@ function draw() {
     g.fillRect(x1 - 3, y + 4, 3, ROW_H - 8);
     g.globalAlpha = 1;
   }
+  g.restore();                                             // 结束普通轨道裁剪区
+  if (mi >= 0) drawTrackRow(mi, mbTop, masterBandH());     // MASTER 带: 恒贴底部
 
   // ---- 横向滚动条 ----
   const SB = 12, totPx = totalPx();
@@ -2427,6 +2894,17 @@ function tick() {
     if (S.loop.on && S.loop.b > S.loop.a && p >= S.loop.b) {
       S.startPos = S.loop.a; S.ctxStart = AC.currentTime + 0.01;
       scheduleAll();
+    }
+    // FX 参数包络实时泵: 播放头走, 参数就跟着走 (setTargetAtTime 平滑跟随);
+    // 只在排程瞬间写一次的话曲线是"死的", 听不出包络 — 约 25Hz 足够顺滑又不压垮参数时间线。
+    const nowMs = performance.now();
+    if (nowMs - (S._fxPumpAt || 0) > 40) {
+      S._fxPumpAt = nowMs;
+      const when = AC.currentTime + 0.03;
+      for (const [id, ch] of trackChains) {
+        const tr = trackById(id);
+        if (tr && tr.env && tr.env.some(e => e.show)) applyFxAutomation(tr, ch, p, when);
+      }
     }
     const px = t2x(curPos());
     const w = cv.clientWidth;
@@ -2517,35 +2995,84 @@ function setGrid(v) {
 // ================= 轨道 FX 弹出面板 =================
 function anyFxOn(t) {
   const fx = fxOf(t);
-  return fx.chorus.on || fx.reverb.on || fx.exciter.on || !!fx.eq.low || !!fx.eq.mid || !!fx.eq.high;
+  return !!(fx.chorus.on || fx.reverb.on || fx.exciter.on || fx.lowpass.on || fx.eq.low || fx.eq.mid || fx.eq.high);
+}
+function envDiamond(t, target) {
+  const env = (t.env || []).find(e => e.target === target);
+  return `<button class="env-dia ${env && env.show ? 'on' : ''}" data-target="${target}" title="包络 ${target}">◆</button>`;
+}
+// ---- FX 浮窗定位/拖动: 居中打开, 标题栏可拖走, 永不跑出视口 ----
+let fxPopPos = null;                       // 拖动后的位置 (会话内保留; 未拖过=每次居中)
+function fxPopApply(pop) {
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let left = fxPopPos ? fxPopPos.left : Math.round((vw - w) / 2);
+  let top = fxPopPos ? fxPopPos.top : Math.round((vh - h) / 2);
+  left = clamp(left, 8, Math.max(8, vw - w - 8));
+  top = clamp(top, 8, Math.max(8, vh - h - 8));
+  pop.style.left = left + 'px'; pop.style.top = top + 'px';
+}
+function fxPopHide() { const p = $('fxPop'); if (p) p.style.display = 'none'; }
+function fxPopWireDrag(pop) {
+  const head = pop.querySelector('.fxHead');
+  if (!head) return;
+  head.addEventListener('pointerdown', e => {
+    if (e.target.closest('.fxClose')) return;
+    e.preventDefault();
+    const r = pop.getBoundingClientRect();
+    const dx = e.clientX - r.left, dy = e.clientY - r.top;
+    try { head.setPointerCapture(e.pointerId); } catch (err) {}
+    const mv = ev2 => {
+      const w = pop.offsetWidth, h = pop.offsetHeight;
+      fxPopPos = {
+        left: clamp(ev2.clientX - dx, 8, Math.max(8, window.innerWidth - w - 8)),
+        top: clamp(ev2.clientY - dy, 8, Math.max(8, window.innerHeight - h - 8)),
+      };
+      pop.style.left = fxPopPos.left + 'px'; pop.style.top = fxPopPos.top + 'px';
+    };
+    const up = () => {
+      head.removeEventListener('pointermove', mv);
+      head.removeEventListener('pointerup', up);
+      head.removeEventListener('pointercancel', up);
+    };
+    head.addEventListener('pointermove', mv);
+    head.addEventListener('pointerup', up);
+    head.addEventListener('pointercancel', up);
+  });
 }
 function openFxPop(t, anchor) {
   const pop = $('fxPop');
   const fx = fxOf(t);
   pop.innerHTML = `
-    <h4>FX — ${t.name}</h4>
+    <div class="fxHead"><span class="fxTitle">FX — ${t.name}</span><button class="fxClose" title="关闭 (Esc)">✕</button></div>
     <div class="fxsec">
       <div class="frow"><label><input type="checkbox" data-k="chorus.on" ${fx.chorus.on ? 'checked' : ''}>合唱</label></div>
-      <div class="frow">深度<input type="range" min="0" max="1" step="0.01" value="${fx.chorus.depth}" data-k="chorus.depth">速率<input type="range" min="0.2" max="6" step="0.1" value="${fx.chorus.rate}" data-k="chorus.rate"></div>
+      <div class="frow">${envDiamond(t, 'chorus.depth')}深度<input type="range" min="0" max="1" step="0.01" value="${fx.chorus.depth}" data-k="chorus.depth">${envDiamond(t, 'chorus.rate')}速率<input type="range" min="0.2" max="6" step="0.1" value="${fx.chorus.rate}" data-k="chorus.rate"></div>
     </div>
     <div class="fxsec">
       <div class="frow"><label><input type="checkbox" data-k="reverb.on" ${fx.reverb.on ? 'checked' : ''}>混响</label></div>
-      <div class="frow">湿度<input type="range" min="0" max="1" step="0.01" value="${fx.reverb.wet}" data-k="reverb.wet">衰减<input type="range" min="0.3" max="6" step="0.1" value="${fx.reverb.decay}" data-k="reverb.decay"></div>
+      <div class="frow">${envDiamond(t, 'reverb.wet')}湿度<input type="range" min="0" max="1" step="0.01" value="${fx.reverb.wet}" data-k="reverb.wet">衰减<input type="range" min="0.3" max="6" step="0.1" value="${fx.reverb.decay}" data-k="reverb.decay"></div>
     </div>
     <div class="fxsec">
       <div class="frow"><label><input type="checkbox" data-k="exciter.on" ${fx.exciter.on ? 'checked' : ''}>激励器</label></div>
-      <div class="frow">激励量<input type="range" min="0" max="1" step="0.01" value="${fx.exciter.amount}" data-k="exciter.amount"></div>
+      <div class="frow">${envDiamond(t, 'exciter.amount')}激励量<input type="range" min="0" max="1" step="0.01" value="${fx.exciter.amount}" data-k="exciter.amount"></div>
     </div>
     <div class="fxsec">
-      <div class="frow">EQ低<input type="range" min="-12" max="12" step="0.5" value="${fx.eq.low}" data-k="eq.low">dB</div>
-      <div class="frow">EQ中<input type="range" min="-12" max="12" step="0.5" value="${fx.eq.mid}" data-k="eq.mid">dB</div>
-      <div class="frow">EQ高<input type="range" min="-12" max="12" step="0.5" value="${fx.eq.high}" data-k="eq.high">dB</div>
+      <div class="frow"><label><input type="checkbox" data-k="lowpass.on" ${fx.lowpass.on ? 'checked' : ''}>低通 Lowpass</label></div>
+      <div class="frow">${envDiamond(t, 'lowpass.freq')}截止<input type="range" min="80" max="18000" step="10" value="${fx.lowpass.freq}" data-k="lowpass.freq">Hz</div>
+      <div class="frow">${envDiamond(t, 'lowpass.q')}共振<input type="range" min="0.1" max="12" step="0.1" value="${fx.lowpass.q}" data-k="lowpass.q">Q</div>
+    </div>
+    <div class="fxsec">
+      <div class="frow">${envDiamond(t, 'eq.low')}EQ低<input type="range" min="-12" max="12" step="0.5" value="${fx.eq.low}" data-k="eq.low">dB</div>
+      <div class="frow">${envDiamond(t, 'eq.mid')}EQ中<input type="range" min="-12" max="12" step="0.5" value="${fx.eq.mid}" data-k="eq.mid">dB</div>
+      <div class="frow">${envDiamond(t, 'eq.high')}EQ高<input type="range" min="-12" max="12" step="0.5" value="${fx.eq.high}" data-k="eq.high">dB</div>
     </div>`;
   pop.style.display = 'block';
-  const r2 = anchor.getBoundingClientRect();
-  pop.style.left = Math.min(r2.right + 8, window.innerWidth - 250) + 'px';
-  pop.style.top = Math.min(r2.top - 10, window.innerHeight - 300) + 'px';
   pop.dataset.track = t.id;
+  fxPopApply(pop);                 // 居中 (用户拖过就沿用拖动位置, 仍夹在视口内)
+  fxPopWireDrag(pop);
+  const closeBtn = pop.querySelector('.fxClose');
+  if (closeBtn) closeBtn.addEventListener('click', e => { e.stopPropagation(); fxPopHide(); });
   for (const inp of pop.querySelectorAll('input')) {
     inp.addEventListener('input', () => {
       const k = inp.dataset.k.split('.');
@@ -2556,6 +3083,30 @@ function openFxPop(t, anchor) {
       const btn = document.querySelector('.fxb[data-track="' + t.id + '"]');
       if (btn) btn.classList.toggle('on', anyFxOn(t));
       invalidate();
+    });
+  }
+  // 包络菱形按钮：点一下创建/显示该参数的自动化轨道
+  for (const btn of pop.querySelectorAll('.env-dia')) {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const target = btn.dataset.target;
+      const def = FX_PARAM_DEFS[target];
+      if (!def) { status('该参数暂不支持包络'); return; }
+      let env = (t.env || []).find(e => e.target === target);
+      if (!env) {
+        pushUndo();
+        env = { target, show: true, points: [{ t: Math.max(0, curPos()), v: normForTarget(target, currentStaticFxValue(t, target)) }] };
+        t.env = t.env || []; t.env.push(env);
+      } else {
+        pushUndo();
+        env.show = !env.show;
+      }
+      saveSoon();
+      const ch0 = trackChains.get(t.id);
+      if (ch0) applyFxParams(t, ch0);   // 关闭包络 → 参数立刻交还给面板静态值 (否则停在包络最后写入的位置)
+      clampScrollY();
+      rebuildPanel(); invalidate();
+      openFxPop(t, anchor);   // 重绘菱形状态
     });
   }
 }
@@ -2570,6 +3121,16 @@ document.addEventListener('click', e => {
 $('btnPlay').addEventListener('click', play);
 $('btnPause').addEventListener('click', pause);
 $('btnStop').addEventListener('click', stop);
+function toggleEnvelope() {
+  S.tool = S.tool === 'envelope' ? 'select' : 'envelope';
+  document.querySelectorAll('header button.on').forEach(b => { if (b.id !== 'snap') b.classList.remove('on'); });
+  if (S.tool === 'envelope') $('btnEnv').classList.add('on');
+  status(S.tool === 'envelope'
+    ? '包络模式: 在素材块上拖拽画音量包络 (单击加点/拖动改 · 右键或双击点删除 · 按 V 退出)'
+    : '已退出包络模式');
+  invalidate();
+}
+$('btnEnv').addEventListener('click', toggleEnvelope);
 $('bpm').addEventListener('change', e => {
   const nb = clamp(parseFloat(e.target.value) || 120, 20, 300);
   const ob = S.project.bpm || 120;
@@ -2628,7 +3189,7 @@ $('fileMidi').addEventListener('change', async e => {
     if (!j.notes || !j.notes.length) throw new Error('MIDI 里没有音符');
     pushUndo();
     let tr = S.project.tracks.find(t => t.name === '参考MIDI' && S.project.midiClips.some(m => m.trackId === t.id));
-    if (!tr) { S.project.tracks.push(tr = { id: uid(), name: '参考MIDI', vol: 1, pan: 0, mute: false, solo: false }); }
+    if (!tr) { pushTrackBeforeMaster(tr = { id: uid(), name: '参考MIDI', vol: 1, pan: 0, mute: false, solo: false }); }
     pushUndo();
     const natural = Math.max(...j.notes.map(n => n.end));
     S.project.midiClips.push({ id: uid(), trackId: tr.id, name: f.name.replace(/\.[^.]+$/, ''), start: snapT(S.playhead), length: natural, notes: j.notes });
@@ -2647,7 +3208,11 @@ $('fileProj').addEventListener('change', e => {
     afterProjectSwap('工程已打开: ' + f.name);
   }).catch(err => status('打开失败: ' + err.message, true));
 });
-window.addEventListener('resize', () => { invalidate(); drawBindings(); if (PR.open) prResize(); });
+window.addEventListener('resize', () => {
+  clampScrollY(); draw(); drawBindings(); if (PR.open) prResize();
+  const fp = $('fxPop');
+  if (fp && fp.style.display === 'block') fxPopApply(fp);   // 窗口变小也别让面板跑出屏幕
+});
 
 // ================= 启动 =================
 const sess = loadSession();
@@ -2681,7 +3246,12 @@ if (!sess) {
   }).catch(() => status('演示加载失败, 可从 File 菜单导入', true));
 }
 buildMenus();
-rebuildPanel();
+try {
+  rebuildPanel();
+} catch (e) {                      // 数据异常绝不能让整页变砖: 提示 + 保留诊断入口
+  status('界面构建失败: ' + e.message + ' (工程数据可能有旧字段; F12 看 __errs)', true);
+  console.error('[vocal-editor] rebuildPanel 失败', e);
+}
 requestAnimationFrame(tick);
 window.__VE = { S, seek, play, pause, undo, redo, select, clipById, midiById, trackById, invalidate, ensureRender, createWhip, applyWhip, snapT, selectionItems, importMediaPath, exportMix, saveProject, openProject, setGrid, zoomFit, persistSession, loadSession, newProject };
 // ===== 实验性钢琴窗 (双击 MIDI 块; 全屏+滚动+多选; 网格与主时间线拍位对齐) =====
@@ -3122,11 +3692,16 @@ prCv.addEventListener('wheel', e => {
   prDraw();
 }, { passive: false });
 
-window.__errs = [];
-window.addEventListener('error', e => { window.__errs.push('ERR: ' + e.message + ' @ ' + (e.filename || '').split('/').pop() + ':' + e.lineno); if (window.__errs.length > 20) window.__errs.shift(); });
-window.addEventListener('unhandledrejection', e => { const r = e.reason; window.__errs.push('REJ: ' + (r && r.message ? r.message : r) + ' ||| ' + String(r && r.stack || '').split('\n').slice(0, 3).join(' <- ')); if (window.__errs.length > 20) window.__errs.shift(); });
+// 错误钩子已在文件头注册 (启动期异常也抓得到)
 window.__restoreProject = (p) => { S.project = fixProject(p); S.lastProj = 'restored'; rebuildPanel(); drawBindings(); invalidate(); for (const c of S.project.clips) ensureRender(c); };
 window.__PR = () => ({ open: PR.open ? PR.open.name : null, drag: PR.drag ? { mode: PR.drag.mode, grabU: PR.drag.grabU, len0: PR.drag.len0, nStart: PR.drag.n ? PR.drag.n.start : null, nMidi: PR.drag.n ? PR.drag.n.midi : null } : null, pps: +PR.pps.toFixed(1), h: +PR.h.toFixed(2), v: +PR.v.toFixed(2), laneH: PR.laneH });
+window.__envDbg = () => ({
+  laneH: ENV_LANE_H, scrollY: S.scrollY, masterCollapsed: !!(masterOf() || {}).collapsed,
+  tracks: S.project.tracks.map((t, i) => ({
+    i, name: t.name, top: trackY(i), h: trackHeightAt(i), isMaster: !!t.isMaster,
+    lanes: (t.isMaster ? masterLanes() : (t.env || []).filter(e => e.show)).map((e, k) => ({ idx: k, target: e.target, nPts: (e.points || []).length, top: trackEnvLaneTop(i, k), bot: trackEnvLaneBottom(i, k) })),
+  })),
+});
 window.__PRNotes = () => {
   if (!PR.open) return null;
   return {
@@ -3142,3 +3717,23 @@ window.__audbg = () => ({
   active: active.length, buffers: S.buffers.size, pend: (S.project.clips.filter(c => c._pend)).length,
   playing: S.playing, playhead: +S.playhead.toFixed(2),
 });
+// 读数确认"包络到底有没有改到参数": 返回轨道 FX 链上各节点的实时值 + 每条包络在播放头处折算成的参数值
+window.__fxDbg = (idOrName) => {
+  const t = S.project.tracks.find(x => x.id === idOrName || x.name === idOrName) || masterOf();
+  if (!t) return null;
+  const ch = trackChains.get(t.id);
+  const env = (t.env || []).map(e => ({
+    target: e.target, show: !!e.show, nPts: (e.points || []).length,
+    atPlayhead: (() => { const v = envValueAt(e.points, curPos()); return (v === null) ? null : +paramValueForTarget(e.target, v); })(),
+  }));
+  if (!ch) return { track: t.name, chain: false, fx: fxOf(t), env };
+  return {
+    track: t.name, chain: true,
+    lp: { freq: +ch.lp.frequency.value.toFixed(1), q: +ch.lp.Q.value.toFixed(3) },
+    chorus: { wet: +ch.chWet.gain.value.toFixed(3), dry: +ch.chDry.gain.value.toFixed(3), rate: +ch.chLfo.frequency.value.toFixed(2) },
+    reverb: { wet: +ch.rvWet.gain.value.toFixed(3) },
+    exciter: { wet: +ch.exWet.gain.value.toFixed(3) },
+    eq: { low: +ch.eqL.gain.value.toFixed(2), mid: +ch.eqM.gain.value.toFixed(2), high: +ch.eqH.gain.value.toFixed(2) },
+    env,
+  };
+};
