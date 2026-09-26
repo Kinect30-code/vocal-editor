@@ -89,6 +89,25 @@ def _envelopes(x, sr):
         return (bd / (bd.max() + 1e-9)).astype(np.float32)
 
     rms = np.sqrt((S ** 2).sum(axis=1) / float(N_FFT) ** 2).astype(np.float32)
+    # 底鼓频段(40~120Hz)能量: downbeat 判定的主证据 (低音鼓/贝斯在"1"上最实)
+    kick_m = (freqs >= 40.0) & (freqs < 120.0)
+    kick = S[:, kick_m].sum(axis=1)
+    kick = (kick / (np.percentile(kick, 95) + 1e-9)).astype(np.float32)
+    # 中频(军鼓体 150~400Hz)能量: 反拍军鼓 + 小节线"能量上跳"判相的主线索 (实测判别力 6.1 倍)
+    mid_m = (freqs >= 150.0) & (freqs < 400.0)
+    midb = S[:, mid_m].sum(axis=1)
+    midb = (midb / (np.percentile(midb, 95) + 1e-9)).astype(np.float32)
+    # 十二平均律色度(chroma): 和声/编排在小节线上变化最大 → 相位自相似用
+    fp = freqs[1:]
+    valid = fp > 55.0
+    midi = np.round(69 + 12 * np.log2(np.maximum(fp[valid], 1e-6) / 440.0)).astype(np.int64)
+    pc = np.mod(midi, 12)
+    chroma_map = np.zeros((len(fp), 12), dtype=np.float32)
+    idx = np.flatnonzero(valid)
+    for k, p_ in zip(idx, pc):
+        chroma_map[k, p_] = 1.0
+    chroma = S[:, 1:] @ chroma_map                      # (nf, 12)
+    chroma = chroma / (np.linalg.norm(chroma, axis=1, keepdims=True) + 1e-9)
     return {
         "fps": fps,
         "onset": oenv.astype(np.float32),
@@ -98,6 +117,9 @@ def _envelopes(x, sr):
         "vocalRatio": (band_vo / total).astype(np.float32),
         "rms": rms,
         "flux": flux_frame.astype(np.float32),
+        "kick": kick,
+        "mid": midb,
+        "chroma": chroma.astype(np.float32),
     }
 
 
@@ -175,17 +197,63 @@ def _beat_f(oenv, beat_idx, fps, tol=0.12):
     return 0.0 if precision + recall <= 0 else 2 * precision * recall / (precision + recall)
 
 
-def _downbeat_phase(beat_idx, oenv, lo, ppb=PPB):
-    """4/4 下, 选一个"第 1 拍"相位: 该相位上的 onset/底鼓攻击最强。"""
-    best, best_s = 0, -1e18
-    for ph in range(ppb):
-        idx = beat_idx[ph::ppb]
-        if len(idx) < 2:
-            continue
-        s = float(oenv[idx].mean() + 0.7 * lo[idx].mean())
-        if s > best_s:
-            best_s, best = s, ph
-    return best, best_s
+def _downbeat_phase(env, bidx, ppb=PPB):
+    """4/4 下选"第 1 拍"相位。
+
+    试过的失败判据(留档, 别回头): onset/低音**流量**均值 → 标记处强度只有平均拍 1.14 倍, 等随机;
+    全曲底鼓/军鼓**绝对值**均值 → 主歌副歌鼓型不同, 平均即洗掉 ✗; 全带/低音带 chroma 变化 → 1.29/1.89 倍, 偏弱。
+
+    真正管用的是**"能量上跳"**: 每拍取 军鼓带/低频带/底鼓 的能量均值, 再看它相对上一拍涨了多少;
+    小节第 1 拍(整拍最满)涨幅最大。实测判别力 **6.1 倍 / 5.8 倍**, 且两首歌都指向与鼓型一致的那个相位 ✓
+    """
+    nframes = len(env["onset"])
+    n = len(bidx)
+    if n < ppb * 2:
+        return 0, 0.0, 0.0
+    fps = env["fps"]
+    def beat_mean(e):
+        out = np.zeros(n)
+        for i in range(n):
+            a = max(0, int(round(bidx[i])))
+            z = int(round(bidx[i + 1])) if i + 1 < n else a + int(round(fps * 0.4))
+            z = max(a + 1, min(z, nframes))
+            out[i] = float(e[a:z].mean())
+        return out
+    # 军鼓带上升是主判据 (单独用判别力 6.1/5.8 倍); 低频/底鼓只做同分兜底 ——
+    # 混进 0.6/0.6 权重会把判别力稀释到 2.1 倍 ✗, 所以这里只给 0.15
+    rise = (1.00 * beat_mean(env["mid"]) +
+            0.15 * beat_mean(env["lo"]) +
+            0.15 * beat_mean(env["kick"]))
+    rise = np.maximum(0.0, np.diff(rise, prepend=rise[:1]))     # 相对上一拍的"上跳"
+    scores = [float(rise[ph::ppb].mean()) if len(rise[ph::ppb]) else 0.0 for ph in range(ppb)]
+    best = int(np.argmax(scores))
+    srt = sorted(scores, reverse=True)
+    strength = (srt[0] / (srt[1] + 1e-9)) if len(srt) > 1 else 1.0
+    return best, float(scores[best]), float(strength)
+
+
+def _snap_onset(t, oenv, fps, win=0.045, maxback=5):
+    """把时间吸附到最近起音的**攻击起点**: 找到附近最强的 onset 峰, 再顺着上升沿回退到起点。
+    切在攻击起点上, 下一首歌的重拍起音才完整保留 (切在峰上会把起音切掉一半)。
+    关键: 回退必须**顺着上升沿**(seg[j-1] < seg[j]), 不能按阈值瞎退 ——
+    按阈值退会一路退进静音里 (实测标记落到 onset≈0.008 的位置 ✗), 反而更接不上。"""
+    if len(oenv) < 3:
+        return t
+    c = int(round(t * fps))
+    a = max(0, c - int(round(win * fps)))
+    b = min(len(oenv) - 1, c + int(round(win * fps)))
+    if b <= a:
+        return t
+    seg = oenv[a:b + 1]
+    k = int(np.argmax(seg))
+    if seg[k] < 0.06:                      # 附近没什么起音 → 保持原样 (改也是瞎改)
+        return t
+    j = k
+    steps = 0
+    while j > 0 and steps < maxback and seg[j - 1] < seg[j]:
+        j -= 1
+        steps += 1
+    return (a + j) / fps
 
 
 # ---------------------------------------------------------------- 逐小节特征
@@ -220,6 +288,7 @@ def _bar_features(env, bars):
             "vocal": float(vo[seg].mean()) if i1 > i0 else 0.0,
             "vocalRatio": float(vocalRatio[seg].mean()) if i1 > i0 else 0.0,
             "lo": float(lo[seg].mean()) if i1 > i0 else 0.0,
+            "chroma": float(np.abs(env["chroma"][seg][1:] - env["chroma"][seg][:-1]).sum(axis=1).mean()) if i1 > i0 + 1 else 0.0,
         })
     return out
 
@@ -246,7 +315,7 @@ def _novelty(feats, win=4):
     """每个小节线的新颖度: 前后 win 小节的特征变化量 (能量/密度/谱流量/重音/人声/低音)。"""
     n = len(feats)
     keys_w = {"energy": 1.0 / 12.0, "onsetDensity": 1.0, "flux": 1.0,
-              "vocal": 1.0, "lo": 1.0, "vocalRatio": 1.0}
+              "vocal": 1.0, "lo": 1.0, "vocalRatio": 1.0, "chroma": 1.0}
     den = {}
     for k in keys_w:
         v = np.array([f[k] for f in feats], dtype=np.float64)
@@ -269,6 +338,10 @@ def _novelty(feats, win=4):
         ab = np.mean([feats[j]["accent"] for j in range(b0, b1)], axis=0)
         na, nb = aa / (aa.sum() + 1e-9), ab / (ab.sum() + 1e-9)
         c["accent"] = float(np.abs(na - nb).sum()) * 0.5
+        # 和声(音色)变化: 段落线常伴随和弦/编排变化
+        cha = np.mean([feats[j].get("chroma", 0.0) for j in range(a0, a1)])
+        chb = np.mean([feats[j].get("chroma", 0.0) for j in range(b0, b1)])
+        c["harmony"] = min(1.0, abs(chb - cha) / (np.std([f.get("chroma", 0.0) for f in feats]) + 1e-6))
         comp.append(c)
         nov[i] = sum(c.values())
     nov = nov / (np.percentile(nov, 95) + 1e-9)
@@ -359,11 +432,13 @@ def _analyze(path, progress=None):
     beats = bidx / fps
     bpm = 60.0 * fps / period
 
-    ph, ph_score = _downbeat_phase(bidx, env["onset"], env["lo"])
+    ph, ph_score, ph_strength = _downbeat_phase(env, bidx)
     down_idx = bidx[ph::PPB]
     down = down_idx / fps
     if len(down) < 2:
         down = beats[::PPB]
+    # 小节线吸附到 onset 起音起点: 标记=切点, 切在起音起点上两首歌才对得齐 (相位误差是"接不上"的主因)
+    down = np.array([_snap_onset(float(t), env["onset"], fps) for t in down])
     # 小节: downbeat 之间 (末尾补齐到音频结束)
     edges = list(down) + [dur]
     bars = []
@@ -387,7 +462,14 @@ def _analyze(path, progress=None):
         progress("乐句与过渡点…")
     phrases = _phrases_full(bars, feats, nov, comp)
     sections = _sections(bars, feats, phrases)
-    trans = _transitions(bars, feats, nov, comp, phrases)
+    # 每小节线的起音强度 (±45ms 内 onset 包络的峰值): 决定这个边界"切得齐不齐"
+    _w = int(round(0.045 * fps))
+    atk = []
+    for _b in bars:
+        _c = int(round(_b["start"] * fps))
+        _a = max(0, _c - _w); _z = min(len(env["onset"]) - 1, _c + _w)
+        atk.append(float(env["onset"][_a:_z + 1].max()) if _z > _a else 0.0)
+    trans = _transitions(bars, feats, nov, comp, phrases, atk)
 
     dens = [f["onsetDensity"] for f in feats]
     nrm_dens = _norm01(dens).tolist() if dens else []
@@ -397,7 +479,7 @@ def _analyze(path, progress=None):
         "beatsPerBar": PPB, "beatF1": round(float(beat_f1), 3),
         "beatTimes": [round(float(t), 4) for t in beats],
         "downbeats": [round(float(t), 4) for t in down],
-        "barPhase": int(ph),
+        "barPhase": int(ph), "downbeatStrength": round(float(ph_strength), 3),
         "bars": bars,
         "features": {
             "barTimes": [b["start"] for b in bars],
@@ -521,7 +603,7 @@ def _sections(bars, feats, phrases):
     return out
 
 
-def _transitions(bars, feats, nov, comp, phrases):
+def _transitions(bars, feats, nov, comp, phrases, atk=None):
     """每个小节线算一个 transition 分数 (0~1) + 分项, 只留 >=0.30 的。"""
     n = len(bars)
     if n < 3:
@@ -543,11 +625,14 @@ def _transitions(bars, feats, nov, comp, phrases):
         is_phrase = 1.0 if (i in ph_starts) else 0.0
         bar_ok = 1.0 if i % PPB == 0 else 0.0            # 恒为 1 (小节线本就是 4 拍对齐)
         pos_prior = _phrase_prior(i) / 0.30
+        # 起音强度: 两首歌按标记对切时, 切点必须落在重音的攻击起点上 → 没起音的边界直接降权
+        a_v = float(atk[i - 1]) if (atk is not None and i - 1 < len(atk)) else 0.0
+        onset_fac = 0.45 + 0.55 * min(1.0, a_v / 0.25)
         # 权重让"特征变化"主导 (结构项只是加成), 这样强边界才拉得开分, 弱边界自动沉下去
         score = (0.30 * is_phrase + 0.10 * pos_prior +
                  0.20 * energy_chg + 0.18 * rhythm_chg + 0.12 * timbre_chg +
                  0.06 * accent_chg + 0.04 * low_chg)
-        score = float(min(1.0, max(0.0, score)))
+        score = float(min(1.0, max(0.0, score * onset_fac)))
         # 类型: 看哪个分项最突出
         parts = {"energy": energy_chg, "rhythm": rhythm_chg, "timbre": timbre_chg,
                  "accent": accent_chg, "bass": low_chg}
@@ -569,6 +654,7 @@ def _transitions(bars, feats, nov, comp, phrases):
                 "accent": round(accent_chg, 3),
                 "bass": round(low_chg, 3),
                 "novelty": round(float(nov[i]), 3),
+                "onset": round(a_v, 3),
             },
         })
     # 绝对分被各特征上限压住 (实测全曲最强也只有 0.6), 直接当置信度看不出差别 ✗
@@ -580,6 +666,10 @@ def _transitions(bars, feats, nov, comp, phrases):
     for t in out:
         n = 0.0 if hi - lo < 1e-6 else float(np.clip((t["_raw"] - lo) / (hi - lo), 0.0, 1.0))
         t["confidence"] = round(0.25 + 0.72 * n, 3)
+        # 硬规则: 起音太弱的边界不可能切得齐 (两首歌对切要落在重音攻击起点上) → 黄色封顶
+        # 这样"红/橙"就是真的可以直接拿来做串烧接点的位置, 而不是看着好看
+        if t["why"].get("onset", 1.0) < 0.05:
+            t["confidence"] = min(t["confidence"], 0.49)
         t["why"]["rawScore"] = round(t.pop("_raw"), 4)
         if t["confidence"] >= 0.30:
             res.append(t)

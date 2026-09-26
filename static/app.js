@@ -2085,9 +2085,14 @@ async function analyzeClip(c, loud) {
       if (!P.analyzed.includes(c.src)) { P.analyzed.push(c.src); persistSession(); }
     }
     if (a.warning) status('结构分析: ' + a.warning, true);
-    else status('结构分析完成: BPM ' + (+a.bpm).toFixed(1) + ' · ' + a.bars.length + ' 小节 · ' +
-                a.phrases.length + ' 乐句 · ' + a.transitionPoints.length + ' 个结构标记' +
-                (a.fromCache ? ' (缓存)' : '') + ' — 底部彩色标记可直接点着切');
+    else {
+      const dbs = +(a.downbeatStrength || 0);
+      const ok = dbs >= 1.6;
+      status('结构分析完成: BPM ' + (+a.bpm).toFixed(1) + ' · ' + a.bars.length + ' 小节 · ' +
+        a.phrases.length + ' 乐句 · ' + a.transitionPoints.length + ' 个结构标记 · 重拍判定' +
+        (ok ? '明确 ' : '不确定 ') + dbs.toFixed(2) + '倍' + (ok ? '' : ' (标记可能不在真正的小节线上, 慎用)') +
+        (a.fromCache ? ' · 缓存' : '') + ' — 底部彩色标记可直接点着切');
+    }
     invalidate();
   } catch (e) {
     status('结构分析失败: ' + e.message, true);
