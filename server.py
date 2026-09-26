@@ -26,6 +26,63 @@ from concurrent.futures import ProcessPoolExecutor
 POOL = ProcessPoolExecutor(max_workers=max(2, (os.cpu_count() or 4)))
 
 
+def _system_python_with_gi():
+    """找系统 python3 (带 gi/GTK 的那个) —— gi 是系统绑定, 装不进 venv。"""
+    import shutil
+    for c in (os.environ.get("VE_SYS_PYTHON"), "python3", "/usr/bin/python3"):
+        if not c:
+            continue
+        p = c if os.path.isabs(c) else shutil.which(c)
+        if not p or not os.path.exists(p):
+            continue
+        try:
+            r = subprocess.run([p, "-c", "import gi;gi.require_version('Gtk','3.0')"],
+                               capture_output=True, timeout=10)
+            if r.returncode == 0:
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def _pick_files(kind="audio", multi=False):
+    """在用户桌面上弹 GTK 文件对话框 (独立进程), 返回 (paths, error)。
+    桌面窗口的浏览器引擎可能被沙盒限制选不了文件 (snap 版 Chromium 就是),
+    而**后端是普通进程** → 选文件交给后端, 选完按路径直接导入。"""
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return [], "没有图形环境 (DISPLAY/WAYLAND_DISPLAY 都没有)"
+    py = _system_python_with_gi()
+    if not py:
+        return [], "本机没有可用的 python3-gi"
+    script = os.path.join(APP, "pickfile.py")
+    if not os.path.isfile(script):
+        return [], "缺 pickfile.py"
+    env = dict(os.environ)
+    state = os.path.join(WORK, ".last-import-dir")
+    try:
+        with open(state, encoding="utf-8") as f:
+            env["VE_PICK_DIR"] = f.read().strip()
+    except OSError:
+        pass
+    try:
+        r = subprocess.run([py, script, kind] + (["--multi"] if multi else []),
+                           capture_output=True, text=True, timeout=1800, env=env)
+    except subprocess.TimeoutExpired:
+        return [], "文件对话框超时"
+    if r.returncode != 0:
+        msg = (r.stderr or "").strip().splitlines()
+        return [], (msg[-1] if msg else "文件对话框打不开")
+    paths = [l.strip() for l in (r.stdout or "").splitlines() if l.strip()]
+    paths = [p for p in paths if os.path.isfile(p)]
+    if paths:
+        try:
+            with open(state, "w", encoding="utf-8") as f:
+                f.write(os.path.dirname(paths[0]))
+        except OSError:
+            pass
+    return paths, None
+
+
 def _info(path):
     import soundfile as sf
     i = sf.info(path)
@@ -149,7 +206,8 @@ class H(BaseHTTPRequestHandler):
             return self._file(os.path.join(STATIC, "index.html"), "text/html; charset=utf-8")
         if u.path == "/api/info":
             return self._send(200, {"engine": dsp.ENGINE, "rb": dsp.rubberband_available(),
-                                    "ver": RENDER_VER, "data": DATA, "port": PORT})
+                                    "ver": RENDER_VER, "data": DATA, "port": PORT,
+                                    "desktop": os.environ.get("VE_DESKTOP") == "1"})
         if u.path == "/api/demo-project":
             with LOCK:
                 return self._send(200, _demo_project())
@@ -209,6 +267,19 @@ class H(BaseHTTPRequestHandler):
         return p
 
     def _dispatch(self, route, req):
+        if route == "/api/pick-file":        # 桌面端: 后端弹系统文件对话框, 返回选中的路径
+            paths, err = _pick_files(str(req.get("kind", "audio")), bool(req.get("multi")))
+            if err:
+                return {"ok": False, "error": err, "paths": []}
+            return {"ok": True, "paths": paths}
+        if route == "/api/import-midi":      # 按路径导入 MIDI (桌面端选完文件后走这里)
+            p = str(req.get("path", ""))
+            if not os.path.isfile(p):
+                raise ValueError("MIDI 文件不存在: " + p)
+            notes = dsp.parse_midi(p)
+            if not notes:
+                raise ValueError("MIDI 里没有音符")
+            return {"ok": True, "name": os.path.basename(p), "notes": notes}
         if route == "/api/load-audio":
             p = self._audio(req.get("path", ""))
             info = _info(p)

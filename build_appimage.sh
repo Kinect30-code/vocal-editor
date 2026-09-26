@@ -108,7 +108,7 @@ chmod +x "$AD/usr/bin/vocal-editor"
 
 # 启动器 + 原生窗口程序 (window.py 用【系统的】python3-gi 跑, 见文件头说明)
 cp launch.sh "$AD/usr/bin/launch.sh"; chmod +x "$AD/usr/bin/launch.sh"
-mkdir -p "$AD/usr/share/vocal-editor"; cp window.py splash.py "$AD/usr/share/vocal-editor/"
+mkdir -p "$AD/usr/share/vocal-editor"; cp window.py splash.py pickfile.py "$AD/usr/share/vocal-editor/"
 
 cat > "$AD/AppRun" <<'EOF'
 #!/bin/sh

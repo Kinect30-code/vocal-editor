@@ -437,6 +437,49 @@ async function uploadAndImport(file) {
   } catch (e) { status(e.message, true); }
 }
 
+// ---- 桌面端导入: 让【后端】弹系统文件对话框, 选完按路径直接导入 ----
+// (窗口用的浏览器引擎可能被沙盒限制选不了文件 —— snap 版 Chromium 就是这样; 后端没这问题)
+async function pickAndImport(kind, multi) {
+  const input = kind === 'audio' ? $('fileAudio') : kind === 'midi' ? $('fileMidi') : $('fileProj');
+  let j;
+  try { j = await post('/api/pick-file', { kind, multi: !!multi }); }
+  catch (e) { j = { ok: false, error: e.message }; }
+  if (!j || !j.ok) {
+    status('系统文件对话框打不开 (' + ((j && j.error) || '未知') + ') → 退回浏览器选择器'); 
+    input.click();
+    return;
+  }
+  if (!j.paths || !j.paths.length) return;          // 用户取消
+  for (const p of j.paths) await importByPath(kind, p);
+}
+async function importByPath(kind, path) {
+  const name = baseName(path);
+  try {
+    if (kind === 'audio') {
+      status('转换中… ' + name);
+      const j = await post('/api/load-audio', { path });
+      addClipFromImport(j, name.replace(/\.[^.]+$/, ''));      // 与浏览器导入同一套收尾
+    } else if (kind === 'midi') {
+      const j = await post('/api/import-midi', { path });
+      pushUndo();
+      let tr = S.project.tracks.find(t => t.name === '参考MIDI' && S.project.midiClips.some(m => m.trackId === t.id));
+      if (!tr) S.project.tracks.push(tr = { id: uid(), name: '参考MIDI', vol: 1, pan: 0, mute: false, solo: false });
+      const natural = Math.max(...j.notes.map(n => n.end));
+      S.project.midiClips.push({ id: uid(), trackId: tr.id, name: name.replace(/\.[^.]+$/, ''),
+                                 start: snapT(S.playhead), length: natural, notes: j.notes });
+      rebuildPanel(); drawBindings();
+      select({ kind: 'midi', id: S.project.midiClips[S.project.midiClips.length - 1].id });
+      status('MIDI 已导入: ' + j.notes.length + ' 个音符');
+    } else {
+      const proj = await post('/api/open-project', { path });
+      pushUndo();
+      S.project = fixProject(proj);
+      S.lastProj = name; $('projname').textContent = name;
+      afterProjectSwap('工程已打开: ' + name);
+    }
+  } catch (e) { status('导入失败: ' + e.message, true); }
+}
+
 // 拖放导入
 const dtHasFiles = e => { const t = e.dataTransfer && e.dataTransfer.types; return !!t && Array.from(t).indexOf('Files') >= 0; };
 window.addEventListener('dragover', e => {
@@ -2184,11 +2227,11 @@ function tick() {
 // ================= 菜单栏 =================
 const MENUS = {
   File: [
-    ['导入音频/媒体… (可多选, mp3/m4s/mp4/webm…)', () => $('fileAudio').click()],
-    ['导入 MIDI…', () => $('fileMidi').click()],
+    ['导入音频/媒体… (可多选, mp3/m4s/mp4/webm…)', () => S.desktop ? pickAndImport('audio', true) : $('fileAudio').click()],
+    ['导入 MIDI…', () => S.desktop ? pickAndImport('midi', false) : $('fileMidi').click()],
     'sep',
     ['保存工程 (下载 .json)  Ctrl+S', saveProjectDL],
-    ['打开工程 (.json)…', () => $('fileProj').click()],
+    ['打开工程 (.json)…', () => S.desktop ? pickAndImport('project', false) : $('fileProj').click()],
     'sep',
     ['导出混音 (循环选区/整曲)…', exportMix],
     'sep',
@@ -2394,6 +2437,7 @@ if (sess) {   // 恢复上次会话 (刷新/重开浏览器不丢工程, 含 MID
   if (S.lastProj) $('projname').textContent = baseName(S.lastProj);
 }
 fetch('/api/info').then(r => r.json()).then(j => {
+    S.desktop = !!j.desktop;   // 桌面端: 导入走后端系统对话框 (浏览器引擎被沙盒限制时也能选文件)
   $('engine').textContent = '引擎: ' + j.engine + (j.rb ? '+rubberband' : '');
   S.rbFlag = j.rb ? 'rb' : j.engine;
   S.renderVer = j.ver;

@@ -132,7 +132,7 @@ elif port_busy; then
 else
   say "→ 启动后端 (端口 ${PORT})…"
   # shellcheck disable=SC2086
-  VE_QUIET=1 "$PY" $SRV_ARG >>"$LOG" 2>&1 &
+  VE_QUIET=1 VE_DESKTOP=1 "$PY" $SRV_ARG >>"$LOG" 2>&1 &
   SRV=$!
   for _ in $(seq 1 80); do port_says_ours && break; sleep 0.25; done
   if ! port_says_ours; then
