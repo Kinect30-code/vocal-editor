@@ -1,0 +1,21 @@
+# 运行环境 / 依赖
+.venv/
+__pycache__/
+*.pyc
+
+# 运行产物 (渲染缓存、混音导出、上传收件箱) —— 可重新生成, 体积很大
+work/
+server.log
+server.pid
+
+# 打包产物
+build/
+dist/
+
+# 参考素材 (第三方音频/视频, 不适合放进源码仓库)
+refs/
+
+# 编辑器/IDE
+.codebuddy/
+.idea/
+.vscode/

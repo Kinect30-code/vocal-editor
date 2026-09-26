@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>vocal-editor</title>
+<!-- 设计系统字体: Inter(界面) + JetBrains Mono(读数). 离线时自动回退到系统字体, 不阻塞渲染 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="menubar">
+  <div class="mroot" data-m="file">File<div class="mdrop"></div></div>
+  <div class="mroot" data-m="edit">Edit<div class="mdrop"></div></div>
+  <div class="mroot" data-m="view">View<div class="mdrop"></div></div>
+  <span id="projname" class="projname"></span>
+</div>
+<header>
+  <div class="trow">
+    <button id="btnPlay" title="播放 (Space)">▶</button>
+    <button id="btnPause" title="暂停 (Space)">⏸</button>
+    <button id="btnStop" title="停止">⏹</button>
+    <span id="pos" class="pos">1.1.0 | 0.00s</span>
+    <label>BPM <input id="bpm" type="number" value="120" min="20" max="300" step="1" class="num"></label>
+    <button id="snap" class="on" title="磁铁吸附 (点击开关)"><span class="gl">🧲</span></button>
+    <select id="grid" title="网格刻度">
+      <option value="b0.25" selected>1/4拍</option>
+      <option value="b1">1拍</option>
+      <option value="b0.5">1/2拍</option>
+      <option value="b0.125">1/8拍</option>
+      <option value="t1">1秒</option>
+      <option value="t0.0333333">帧(30fps)</option>
+    </select>
+    <label><input id="loopOn" type="checkbox">循环</label>
+    <button id="zoomOut">－</button>
+    <button id="zoomIn">＋</button>
+    <button id="zoomFit">适应</button>
+    <label>总音量 <input id="master" type="range" min="0" max="1.5" step="0.01" value="0.9" class="rng"></label>
+    <span id="engine"></span>
+  </div>
+</header>
+<div id="main">
+  <div id="left">
+    <div id="panelHead"><span class="ph-title">轨道</span><button id="addTrack" title="添加轨道">＋ 轨道</button></div>
+    <div id="panel"></div>
+  </div>
+  <div id="tlWrap">
+    <canvas id="tl"></canvas>
+  </div>
+  <svg id="whipSvg"></svg>
+  <div id="dropHint">松手导入 (ffmpeg 支持的音频/视频/m4s 都行)</div>
+</div>
+<div id="ctxMenu"></div>
+<div id="fxPop"></div>
+<div id="prWrap">
+  <div id="prHead"><b id="prTitle">钢琴窗</b>
+      <button id="prSlide" title="开启后新画的音符为滑音键 (FL 式): 从当前音高在其跨度内滑向自身音高, 滑完保持; 键越长滑得越慢">滑音</button>
+      <button id="prSnap" class="on" title="磁铁吸附 (与主工具栏同步) · 拖拽时按住 Shift = 临时忽略吸附, 可微调"><span class="gl">🧲</span></button>
+      <select id="prGrid" title="钢琴窗自己的网格刻度 (独立于主时间线; 也可以在顶部标尺上右键切换) — 吸附与画出的网格线都跟着它">
+        <option value="b1">1拍</option>
+        <option value="b0.5">1/2拍</option>
+        <option value="b0.25" selected>1/4拍</option>
+        <option value="b0.125">1/8拍</option>
+        <option value="b0.0625">1/16拍</option>
+        <option value="t1">1秒</option>
+        <option value="t0.0333333">帧(30fps)</option>
+      </select>
+      <label class="mon"><input type="checkbox" id="prMon">试听(chip)</label>
+      <span class="hint">标尺=时间轴绝对秒(点/拖=定位播放头 · 右键=网格刻度) | 空白点按=新增 · 拖动=移动 · 拖右缘=拉长 · Shift=忽略吸附 · Alt+点=删除 · 滚轮=翻音高 · Ctrl+滚轮=缩放</span>
+      <button id="prClose">✕</button></div>
+  <canvas id="prCanvas"></canvas>
+  <div id="prMenu"></div>
+</div>
+<input id="fileAudio" type="file" multiple accept="audio/*,video/*,.m4s,.mp3,.wav,.flac,.m4a,.ogg,.opus" style="display:none">
+<input id="fileMidi" type="file" accept=".mid,.midi" style="display:none">
+<input id="fileProj" type="file" accept=".json,application/json" style="display:none">
+<footer><span id="status">Space 走带 · 点块=选中+光标到位 · S 切开 · 拖缘=裁剪</span><span class="hintbar">Alt+拖块=滑动素材 · Alt+拖右缘=拉伸 · 拖顶边=音量 · 拖上角=淡化 · = / - 变调 · B/N 循环区 · Shift=忽略吸附 · 右键=菜单/框选 · 文件拖进窗口导入</span></footer>
+<script src="/app.js"></script>
+</body>
+</html>

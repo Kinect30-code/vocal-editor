@@ -1,0 +1,115 @@
+{
+ "bpm": 120,
+ "tracks": [
+  {
+   "id": "t1",
+   "name": "人声",
+   "vol": 1,
+   "pan": 0,
+   "mute": false,
+   "solo": false
+  },
+  {
+   "id": "t2",
+   "name": "人声2",
+   "vol": 1,
+   "pan": 0,
+   "mute": false,
+   "solo": false
+  },
+  {
+   "id": "t3",
+   "name": "参考MIDI",
+   "vol": 1,
+   "pan": 0,
+   "mute": false,
+   "solo": false
+  }
+ ],
+ "clips": [
+  {
+   "id": "wqpkbp8",
+   "trackId": "t1",
+   "src": "/home/kinect/.zcode/workspace/default/vocal-editor/work/render/imp_3d6656e46dff2a9278b26b712284d8d5.wav",
+   "render": null,
+   "name": "哈基米",
+   "start": 14,
+   "offset": 35.30875985745197,
+   "length": 0.8524022340007136,
+   "stretch": 1,
+   "pitch": 0,
+   "srcDur": 68.39467120181406,
+   "renderKey": null
+  },
+  {
+   "id": "25hcw2r",
+   "trackId": "t1",
+   "src": "/home/kinect/.zcode/workspace/default/vocal-editor/work/render/imp_3d6656e46dff2a9278b26b712284d8d5.wav",
+   "render": null,
+   "name": "哈基米",
+   "start": 40,
+   "offset": 36.16116209145268,
+   "length": 32.23350911036138,
+   "stretch": 1,
+   "pitch": 0,
+   "srcDur": 68.39467120181406,
+   "renderKey": null
+  },
+  {
+   "id": "xiy1bji",
+   "trackId": "t1",
+   "src": "/home/kinect/.zcode/workspace/default/vocal-editor/work/render/imp_3d6656e46dff2a9278b26b712284d8d5.wav",
+   "render": null,
+   "name": "哈基米",
+   "start": 30.5,
+   "offset": 35.05389279306106,
+   "length": 0.25486706439090767,
+   "stretch": 1,
+   "pitch": 0,
+   "srcDur": 68.39467120181406,
+   "renderKey": null
+  }
+ ],
+ "midiClips": [
+  {
+   "id": "m1",
+   "trackId": "t3",
+   "name": "melody",
+   "start": 0,
+   "length": 2,
+   "notes": [
+    {
+     "start": 0,
+     "end": 0.25,
+     "midi": 60
+    },
+    {
+     "start": 0.25,
+     "end": 0.5,
+     "midi": 62
+    },
+    {
+     "start": 0.5,
+     "end": 1,
+     "midi": 64
+    },
+    {
+     "start": 1,
+     "end": 1.25,
+     "midi": 67
+    },
+    {
+     "start": 1.25,
+     "end": 1.5,
+     "midi": 64
+    },
+    {
+     "start": 1.5,
+     "end": 2,
+     "midi": 60
+    }
+   ]
+  }
+ ],
+ "whips": []
+}
