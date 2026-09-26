@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # vocal-editor 启动器: 起后端服务 → 开一个【真正的应用窗口】→ 关窗口即退出。
 #
-#   ./launch.sh              原生窗口 (GTK + WebKit2, 用系统 python3-gi) → 失败退回 chromium --app=
+#   ./launch.sh              默认: Chromium 应用窗口 (无地址栏, 声音/设备选择最全) → 退回原生 GTK 窗口 → 退回浏览器
+#   ./launch.sh --native     强制原生窗口 (GTK + WebKit2, 用系统 python3-gi)
 #   ./launch.sh --chromium   应用窗口用 Chromium 开 (声音最稳)
 #   ./launch.sh --browser    直接用默认浏览器
 #   ./launch.sh --no-window  只起服务 (放服务器上/远程访问用)
@@ -16,7 +17,8 @@ MODE=auto
 for a in "$@"; do
   case "$a" in
     --browser) MODE=browser ;;
-    --chromium) MODE=chromium ;;   # 无地址栏的应用窗口用 Chromium 开 (声音最稳, 网页引擎侧没声音时的兜底)
+    --chromium) MODE=chromium ;;
+    --native) MODE=native ;;   # 强制原生 GTK+WebKit2 窗口   # 无地址栏的应用窗口用 Chromium 开 (声音最稳, 网页引擎侧没声音时的兜底)
     --no-window) MODE=server ;;
     --check) MODE=check ;;
     --probe) MODE=probe ;;
@@ -149,11 +151,15 @@ case "$MODE" in
   browser) open_default; echo "关掉这个终端 (Ctrl+C) 即退出。"; wait $SRV ;;
   chromium)
     if open_appwin; then echo "关掉这个终端 (Ctrl+C) 即退出。"; wait $SRV; else open_default; wait $SRV; fi ;;
+  native)
+    if open_native; then exit 0; else echo "原生窗口不可用 (缺 python3-gi / WebKit2GTK)"; exit 1; fi ;;
   *)
-    if open_native; then
-      exit 0                       # 窗口关闭 → 退出, trap 收掉后端
-    elif open_appwin; then
+    # 默认用 Chromium 应用窗口 (无地址栏的独立窗口): WebAudio 与"输出设备选择"最完整。
+    # GTK+WebKit2 那层在部分机器上 WebAudio 不出声 → 需要时用 --native 强制。
+    if open_appwin; then
       echo "关掉这个终端 (Ctrl+C) 即退出。"; wait $SRV
+    elif open_native; then
+      exit 0                       # 窗口关闭 → 退出, trap 收掉后端
     else
       open_default; echo "关掉这个终端 (Ctrl+C) 即退出。"; wait $SRV
     fi ;;

@@ -66,16 +66,29 @@ def main():
         except Exception:
             pass
 
-    # 音频自检: 结果用 console.log 打出来 (页面 console 已转发到终端), 比 JS 回调可靠
+    # 音频自检: 结果通过 document.title 回传 (WebKit 会发 notify::title, 这是最可靠的 JS→Python 通道;
+    # 只在自测时改标题, 免得正常使用时标题被顶掉)
     PROBE_JS = (
         "(function(){try{"
         "var C=window.AudioContext||window.webkitAudioContext;var c=new C();"
         "var o={before:c.state,sr:c.sampleRate};"
         "var fin=function(tag){try{o.after=c.state;o.app=(typeof window.__audbg==='function')?window.__audbg():null;}catch(e){o.appErr=''+e;}"
-        "console.log('[audio-probe '+tag+'] '+JSON.stringify(o));};"
-        "if(c.resume&&c.state!=='running'){c.resume().then(function(){fin('resumed')},function(e){o.resumeErr=''+e;console.log('[audio-probe fail] '+JSON.stringify(o));});}"
+        "var s='AUDIOPROBE '+tag+' '+JSON.stringify(o);console.log(s);"
+        + ("document.title=s;" if SELFTEST else "") +
+        "};"
+        "if(c.resume&&c.state!=='running'){c.resume().then(function(){fin('resumed')},function(e){o.resumeErr=''+e;fin('resumeErr');});}"
         "else fin('sync');"
         "}catch(e){console.log('[audio-probe ERR] '+e.message)}})()")
+
+    def on_title(v, _p):
+        try:
+            print("[窗口标题] %s" % v.get_title(), flush=True)
+        except Exception:
+            pass
+    try:
+        view.connect("notify::title", on_title)
+    except Exception:
+        pass
 
     def on_load(_v, ev):
         if ev == WebKit2.LoadEvent.FINISHED:

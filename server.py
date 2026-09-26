@@ -148,7 +148,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/":
             return self._file(os.path.join(STATIC, "index.html"), "text/html; charset=utf-8")
         if u.path == "/api/info":
-            return self._send(200, {"engine": dsp.ENGINE, "rb": dsp.rubberband_available(), "ver": RENDER_VER})
+            return self._send(200, {"engine": dsp.ENGINE, "rb": dsp.rubberband_available(),
+                                    "ver": RENDER_VER, "data": DATA, "port": PORT})
         if u.path == "/api/demo-project":
             with LOCK:
                 return self._send(200, _demo_project())

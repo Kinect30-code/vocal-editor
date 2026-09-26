@@ -1214,6 +1214,8 @@ function ensureAC() {
     masterGain = AC.createGain();
     masterGain.gain.value = parseFloat($('master').value);
     masterGain.connect(AC.destination);
+    const sv = localStorage.getItem('ve.sinkId');       // ⚙ 设置里选的输出设备
+    if (sv && AC.setSinkId) { try { AC.setSinkId(sv).catch(() => {}); } catch (e) {} }
   }
   if (AC.state === 'suspended') AC.resume();
 }
@@ -1494,6 +1496,97 @@ function bleep(midi, dur) {   // 建/改音符时的即时试听音 (UI 反馈: 
   o.connect(gn); gn.connect(masterGain || AC.destination);
   o.start(t0); o.stop(t0 + d + 0.03);
 }
+// ================= ⚙ 设置面板 (菜单栏 View 旁边) =================
+// 用途: 音频排查 —— 输出设备、引擎状态、测试音、环境信息。
+function setHint(msg) {
+  const el = $('setHint');
+  if (el) el.innerHTML = msg || '—';
+}
+function winEngineName() {
+  if (/Chrome\//.test(navigator.userAgent)) return 'Chromium';
+  if (/AppleWebKit/.test(navigator.userAgent)) return 'WebKit(GTK)';
+  return '浏览器';
+}
+function refreshAcState() {
+  const st = $('setAcState'), sel = $('setSink');
+  if (!st) return;
+  st.textContent = AC ? (AC.state + ' · ' + AC.sampleRate + 'Hz') : '未创建 (先点一下页面/播放再回来)';
+  const can = !!(AC && AC.setSinkId);
+  if (sel) sel.disabled = !can;
+  if (AC && AC.state === 'suspended') {
+    setHint('音频引擎处于 <b>suspended</b> —— 在页面里点一下(或按播放)再试测试音');
+  } else if (!can) {
+    setHint('当前窗口引擎是 <b>' + winEngineName() + '</b>，它不支持切换输出设备。'
+      + '要选设备/要更稳的声音 → 用 <b>--chromium</b> 启动本程序（无地址栏的 Chromium 窗口，WebAudio 链路最完整）。');
+  }
+}
+async function refreshSinks() {
+  const sel = $('setSink');
+  if (!sel) return;
+  const cur = localStorage.getItem('ve.sinkId') || '';
+  let devs = [];
+  try {
+    devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audiooutput');
+  } catch (e) {
+    setHint('枚举设备失败: ' + e.message);
+  }
+  sel.innerHTML = '<option value="">(系统默认)</option>' + devs.map((d, i) =>
+    '<option value="' + d.deviceId + '">' +
+    (d.label || ('输出设备 ' + (i + 1))).replace(/[<>&"]/g, '') + '</option>').join('');
+  sel.value = cur;
+  if (!devs.length) setHint('没枚举到输出设备（当前引擎可能不暴露设备列表）');
+  return devs.length;
+}
+async function applySink(id) {
+  localStorage.setItem('ve.sinkId', id || '');
+  if (!AC) return setHint('已记住这个选择；音频引擎一创建就自动用上');
+  if (!AC.setSinkId) return setHint('这个引擎不支持切换输出设备（Chromium 支持）');
+  try {
+    await AC.setSinkId(id || '');
+    setHint('已切到: ' + (id ? '所选设备' : '系统默认'));
+  } catch (e) {
+    setHint('切换失败: ' + e.message);
+  }
+}
+function toggleSettings(force) {
+  const p = $('setPanel');
+  if (!p) return;
+  const show = force === undefined ? p.style.display !== 'block' : force;
+  p.style.display = show ? 'block' : 'none';
+  $('btnSettings').classList.toggle('on', show);
+  if (!show) return;
+  const r = $('btnSettings').getBoundingClientRect();
+  p.style.left = Math.max(8, Math.min(window.innerWidth - 436, r.left - 6)) + 'px';
+  p.style.top = (r.bottom + 2) + 'px';
+  ensureAC();                 // 打开面板就是一次用户手势 → 顺手把音频引擎拉起来, 状态/设备才是真的
+  refreshAcState(); refreshSinks();
+  fetch('/api/info').then(x => x.json()).then(j => {
+    const e1 = $('setEngine');
+    if (e1) e1.textContent = 'engine=' + j.engine + ' · rubberband=' + (j.rb ? '有' : '无') + ' · ' + (j.ver || '');
+    const d1 = $('setData');
+    if (d1) d1.textContent = j.data || '(未知)';
+  }).catch(() => {});
+  const w1 = $('setWin');
+  if (w1) w1.textContent = '端口 ' + (location.port || '80') + ' · 窗口引擎 ' + winEngineName();
+}
+$('btnSettings').addEventListener('click', e => { e.stopPropagation(); toggleSettings(); });
+$('setClose').addEventListener('click', () => toggleSettings(false));
+$('setSink').addEventListener('change', e => applySink(e.target.value));
+$('setSinkApply').addEventListener('click', () => { refreshSinks(); });
+$('setTest').addEventListener('click', () => {
+  ensureAC();
+  if (AC && AC.state === 'suspended') AC.resume();
+  bleep(69, 1.2);                       // A4 = 440Hz
+  status('测试音 440Hz × 1.2s 已播放 — 听不到就看设置面板里的提示');
+  setTimeout(refreshAcState, 150);
+});
+document.addEventListener('click', e => {
+  const p = $('setPanel');
+  if (!p || p.style.display !== 'block') return;
+  if (e.target.closest('#setPanel,#btnSettings')) return;
+  toggleSettings(false);
+});
+
 function scheduleMonitor() {   // 钢琴窗试听: chip 方波, 仅编辑器内, 不进外发
   if (!(PR.monitor && PR.open && AC)) return;
   const m = PR.open;

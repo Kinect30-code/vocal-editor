@@ -14,6 +14,7 @@
   <div class="mroot" data-m="file">File<div class="mdrop"></div></div>
   <div class="mroot" data-m="edit">Edit<div class="mdrop"></div></div>
   <div class="mroot" data-m="view">View<div class="mdrop"></div></div>
+  <div id="btnSettings" class="mbtn" title="设置: 音频输出设备 / 测试音 / 环境信息">⚙ 设置</div>
   <span id="projname" class="projname"></span>
 </div>
 <header>
@@ -76,6 +77,20 @@
 <input id="fileMidi" type="file" accept=".mid,.midi" style="display:none">
 <input id="fileProj" type="file" accept=".json,application/json" style="display:none">
 <footer><span id="status">Space 走带 · 点块=选中+光标到位 · S 切开 · 拖缘=裁剪</span><span class="hintbar">Alt+拖块=滑动素材 · Alt+拖右缘=拉伸 · 拖顶边=音量 · 拖上角=淡化 · = / - 变调 · B/N 循环区 · Shift=忽略吸附 · 右键=菜单/框选 · 文件拖进窗口导入</span></footer>
+
+<div id="setPanel">
+  <h4>⚙ 设置</h4>
+  <div class="srow"><span>音频引擎</span><span id="setAcState" class="mono">—</span></div>
+  <div class="srow"><span>输出设备</span><select id="setSink"><option value="">(系统默认)</option></select>
+    <button id="setSinkApply" title="重新枚举设备">刷新</button></div>
+  <div class="srow"><span>测试</span><button id="setTest">播放测试音 (440Hz × 1.2s)</button></div>
+  <div class="srow"><span></span><span id="setHint" class="hint2">—</span></div>
+  <div class="ssec"></div>
+  <div class="srow"><span>后端渲染</span><span id="setEngine" class="mono">—</span></div>
+  <div class="srow"><span>数据目录</span><span id="setData" class="mono">—</span></div>
+  <div class="srow"><span>端口 / 窗口</span><span id="setWin" class="mono">—</span></div>
+  <button id="setClose" class="sclose">✕</button>
+</div>
 <script src="/app.js"></script>
 </body>
 </html>
