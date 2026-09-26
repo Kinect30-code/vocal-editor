@@ -524,31 +524,15 @@ function whipAnchor(trackId) {
 function drawBindings() {
   const svg = $('whipSvg');
   svg.innerHTML = '';
-  const ex = whipEdgeX();     // 左侧面板右边缘: 两端都锚在这里, 线只在画布里鼓出去
-  let wk = 0;
+  // 接管状态只看一个绿点 (不再画弧线: 会横跨画布很碍事); 目标轨道行左侧竖条变浅绿
+  const ex = whipEdgeX();
   for (const w of S.project.whips) {
-    const ys = whipRowY(w.midiTrackId), yd = whipRowY(w.targetTrackId);
-    if (ys === null || yd === null) continue;
-    const bulge = 44 + (wk++) * 16;      // 同一行出发的多条线扇开, 不重叠
-    const my = (ys + yd) / 2;
-    const a = { x: ex, y: ys }, b = { x: ex, y: yd };
-    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    p.setAttribute('d', `M ${a.x} ${a.y} C ${a.x + bulge} ${my}, ${b.x + bulge} ${my}, ${b.x} ${b.y}`);
-    p.setAttribute('stroke-width', '2.5');
-    svg.appendChild(p);
-    const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    ring.setAttribute('cx', a.x); ring.setAttribute('cy', a.y); ring.setAttribute('r', 4);
-    ring.setAttribute('fill', 'none'); ring.setAttribute('stroke-width', '2');
-    svg.appendChild(ring);
+    const yd = whipRowY(w.targetTrackId);
+    if (yd === null) continue;
     const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    dot.setAttribute('cx', b.x); dot.setAttribute('cy', b.y); dot.setAttribute('r', 5);
+    dot.setAttribute('cx', ex); dot.setAttribute('cy', yd); dot.setAttribute('r', 5);
     dot.setAttribute('fill', '#2dd4bf');
     svg.appendChild(dot);
-    const stub = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    stub.setAttribute('x1', b.x); stub.setAttribute('y1', b.y);
-    stub.setAttribute('x2', b.x + 20); stub.setAttribute('y2', b.y);
-    stub.setAttribute('stroke-width', '2.5');
-    svg.appendChild(stub);
   }
   if (S.whip) {
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
@@ -1758,7 +1742,8 @@ function rebuildPanel() {
     const div = document.createElement('div');
     div.className = 'trk';
     div.dataset.trackid = t.id;
-    div.style.setProperty('--tag', trackHue(t));
+    // 被 whip 接管的轨道: 左侧 4px 竖条变浅绿 (连线的替代标记)
+    div.style.setProperty('--tag', S.project.whips.some(w => w.targetTrackId === t.id) ? '#86efac' : trackHue(t));
     div.innerHTML = `
       <div class="row2">
         <span class="tidx">${String(S.project.tracks.indexOf(t) + 1).padStart(2, '0')}</span>
